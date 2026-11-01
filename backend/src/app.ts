@@ -7,6 +7,7 @@ import { config } from "./config.js";
 import { authRoutes } from "./modules/auth/routes.js";
 import { inviteRoutes } from "./modules/invites/routes.js";
 import { joinRoutes } from "./modules/join/routes.js";
+import { livekitRoutes } from "./modules/livekit/routes.js";
 import { sessionRoutes } from "./modules/sessions/routes.js";
 import { spaceRoutes } from "./modules/spaces/routes.js";
 import { registerAuthDecorators } from "./plugins/auth.js";
@@ -29,6 +30,12 @@ export function buildApp() {
             in: "cookie",
             name: "token",
             description: "Set automatically after a successful login.",
+          },
+          participantCookieAuth: {
+            type: "apiKey",
+            in: "cookie",
+            name: "participant",
+            description: "Set when joining as a guest or observer.",
           },
         },
       },
@@ -54,6 +61,7 @@ export function buildApp() {
   app.register(spaceRoutes);
   app.register(inviteRoutes);
   app.register(joinRoutes);
+  app.register(livekitRoutes);
   app.register(sessionRoutes);
 
   app.get(

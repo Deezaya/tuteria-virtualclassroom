@@ -21,6 +21,7 @@
     "@fastify/swagger-ui": "^5.2.3",
     "dotenv": "^16.4.7",
     "fastify": "^5.6.1",
+    "livekit-server-sdk": "^2.15.0",
     "argon2": "^0.44.0",
     "zod": "^4.1.12"
   },
