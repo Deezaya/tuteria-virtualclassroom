@@ -20,6 +20,22 @@ model User {
   name           String
   role           UserRole @default(student)
   createdAt      DateTime @default(now())
+  spaces         Space[]
 
   @@map("users")
+}
+
+model Space {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name              String
+  creatorId         String   @db.Uuid
+  creator           User     @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  inviteTokenHash   String   @unique
+  observerTokenHash String   @unique
+  createdAt         DateTime @default(now())
+  lastUsedAt        DateTime?
+
+  @@index([creatorId])
+  @@index([name])
+  @@map("spaces")
 }

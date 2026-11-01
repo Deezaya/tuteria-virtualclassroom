@@ -3,6 +3,12 @@ import { z } from "zod";
 
 const environmentSchema = z.object({
   DATABASE_URL: z.string().trim().min(1, "DATABASE_URL is required"),
+  JWT_SECRET: z
+    .string()
+    .trim()
+    .min(32, "JWT_SECRET must be at least 32 characters"),
+  ADMIN_EMAIL: z.string().optional(),
+  ADMIN_PASSWORD: z.string().optional(),
   LIVEKIT_URL: z.string().optional(),
   LIVEKIT_API_KEY: z.string().optional(),
   LIVEKIT_API_SECRET: z.string().optional(),

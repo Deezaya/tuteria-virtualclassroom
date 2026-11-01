@@ -1,9 +1,74 @@
 import Fastify from "fastify";
+import cookie from "@fastify/cookie";
+import jwt from "@fastify/jwt";
+import swagger from "@fastify/swagger";
+import swaggerUi from "@fastify/swagger-ui";
+import { config } from "./config.js";
+import { authRoutes } from "./modules/auth/routes.js";
+import { inviteRoutes } from "./modules/invites/routes.js";
+import { spaceRoutes } from "./modules/spaces/routes.js";
+import { registerAuthDecorators } from "./plugins/auth.js";
 
 export function buildApp() {
   const app = Fastify({ logger: true });
+  registerAuthDecorators(app);
 
-  app.get("/health", async () => ({ status: "ok" }));
+  app.register(swagger, {
+    openapi: {
+      info: {
+        title: "Tuteria Classroom API",
+        description: "API documentation and interactive endpoint testing.",
+        version: "1.0.0",
+      },
+      components: {
+        securitySchemes: {
+          cookieAuth: {
+            type: "apiKey",
+            in: "cookie",
+            name: "token",
+            description: "Set automatically after a successful login.",
+          },
+        },
+      },
+    },
+  });
+  app.register(swaggerUi, {
+    routePrefix: "/docs",
+    uiConfig: {
+      deepLinking: false,
+      docExpansion: "list",
+    },
+  });
+
+  app.register(cookie);
+  app.register(jwt, {
+    secret: config.JWT_SECRET,
+    cookie: {
+      cookieName: "token",
+      signed: false,
+    },
+  });
+  app.register(authRoutes);
+  app.register(spaceRoutes);
+  app.register(inviteRoutes);
+
+  app.get(
+    "/health",
+    {
+      schema: {
+        tags: ["Health"],
+        summary: "Check API health",
+        response: {
+          200: {
+            type: "object",
+            properties: { status: { type: "string" } },
+            required: ["status"],
+          },
+        },
+      },
+    },
+    async () => ({ status: "ok" }),
+  );
 
   return app;
 }
