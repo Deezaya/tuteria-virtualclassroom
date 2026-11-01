@@ -13,6 +13,22 @@ enum UserRole {
   student
 }
 
+enum ClassRole {
+  admin
+  tutor
+  student
+  guest
+  observer
+}
+
+enum ParticipantStatus {
+  waiting
+  admitted
+  denied
+  left
+  removed
+}
+
 model User {
   id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   email          String   @unique
@@ -21,6 +37,7 @@ model User {
   role           UserRole @default(student)
   createdAt      DateTime @default(now())
   spaces         Space[]
+  participants   Participant[]
 
   @@map("users")
 }
@@ -34,8 +51,40 @@ model Space {
   observerTokenHash String   @unique
   createdAt         DateTime @default(now())
   lastUsedAt        DateTime?
+  sessions          Session[]
 
   @@index([creatorId])
   @@index([name])
   @@map("spaces")
+}
+
+model Session {
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  spaceId      String        @db.Uuid
+  space        Space         @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  startedAt    DateTime      @default(now())
+  endedAt      DateTime?
+  endedBy      String?       @db.Uuid
+  participants Participant[]
+
+  @@index([spaceId, endedAt])
+  @@map("sessions")
+}
+
+model Participant {
+  id          String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId   String            @db.Uuid
+  session     Session           @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  userId      String?           @db.Uuid
+  user        User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+  displayName String?
+  classRole   ClassRole
+  status      ParticipantStatus
+  randomId    String?           @unique
+  joinedAt    DateTime          @default(now())
+  leftAt      DateTime?
+
+  @@index([sessionId, status])
+  @@index([userId])
+  @@map("participants")
 }

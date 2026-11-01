@@ -6,6 +6,8 @@ import swaggerUi from "@fastify/swagger-ui";
 import { config } from "./config.js";
 import { authRoutes } from "./modules/auth/routes.js";
 import { inviteRoutes } from "./modules/invites/routes.js";
+import { joinRoutes } from "./modules/join/routes.js";
+import { sessionRoutes } from "./modules/sessions/routes.js";
 import { spaceRoutes } from "./modules/spaces/routes.js";
 import { registerAuthDecorators } from "./plugins/auth.js";
 
@@ -40,7 +42,7 @@ export function buildApp() {
     },
   });
 
-  app.register(cookie);
+  app.register(cookie, { secret: config.JWT_SECRET });
   app.register(jwt, {
     secret: config.JWT_SECRET,
     cookie: {
@@ -51,6 +53,8 @@ export function buildApp() {
   app.register(authRoutes);
   app.register(spaceRoutes);
   app.register(inviteRoutes);
+  app.register(joinRoutes);
+  app.register(sessionRoutes);
 
   app.get(
     "/health",
