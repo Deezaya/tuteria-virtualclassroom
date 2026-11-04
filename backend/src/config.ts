@@ -3,12 +3,15 @@ import { z } from "zod";
 
 const environmentSchema = z.object({
   DATABASE_URL: z.string().trim().min(1, "DATABASE_URL is required"),
+  DIRECT_URL: z.string().optional(),
   JWT_SECRET: z
     .string()
     .trim()
     .min(32, "JWT_SECRET must be at least 32 characters"),
   ADMIN_EMAIL: z.string().optional(),
   ADMIN_PASSWORD: z.string().optional(),
+  FRONTEND_ORIGIN: z.string().trim().url().default("http://localhost:5173"),
+  FRONTEND_URL: z.string().trim().url().default("http://localhost:5173"),
   LIVEKIT_URL: z.string().trim().url("LIVEKIT_URL must be a valid URL"),
   LIVEKIT_API_KEY: z.string().trim().min(1, "LIVEKIT_API_KEY is required"),
   LIVEKIT_API_SECRET: z.string().trim().min(1, "LIVEKIT_API_SECRET is required"),

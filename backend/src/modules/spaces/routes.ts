@@ -12,7 +12,14 @@ const renameSpaceSchema = createSpaceSchema;
 const spaceParamsSchema = z.object({ spaceId: z.string().uuid() });
 const searchQuerySchema = z.object({
   search: z.string().trim().max(100).optional(),
+  sort: z.enum(["lastUsed", "nameAsc"]).default("lastUsed"),
+  scope: z.enum(["all", "mine"]).default("all"),
 });
+const errorResponseSchema = {
+  type: "object",
+  properties: { message: { type: "string" } },
+  required: ["message"],
+};
 
 function invalidBody(reply: FastifyReply) {
   return reply.code(400).send({ message: "Invalid request body" });
@@ -81,49 +88,133 @@ export const spaceRoutes: FastifyPluginAsync = async (app) => {
         security: [{ cookieAuth: [] }],
         querystring: {
           type: "object",
-          properties: { search: { type: "string", maxLength: 100 } },
+          properties: {
+            search: { type: "string", maxLength: 100 },
+            sort: { type: "string", enum: ["lastUsed", "nameAsc"], default: "lastUsed" },
+            scope: { type: "string", enum: ["all", "mine"], default: "all" },
+          },
         },
         response: {
-          200: { description: "Spaces visible to the current admin or tutor." },
-          400: {
+          200: {
             type: "object",
-            properties: { message: { type: "string" } },
-            required: ["message"],
+            properties: {
+              spaces: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    id: { type: "string" },
+                    name: { type: "string" },
+                    creatorId: { type: "string" },
+                    createdAt: { type: "string", format: "date-time" },
+                    lastUsedAt: { type: "string", format: "date-time", nullable: true },
+                    peopleInClass: { type: "integer", minimum: 0 },
+                    activeNow: { type: "boolean" },
+                  },
+                  required: [
+                    "id",
+                    "name",
+                    "creatorId",
+                    "createdAt",
+                    "lastUsedAt",
+                    "peopleInClass",
+                    "activeNow",
+                  ],
+                },
+              },
+            },
+            required: ["spaces"],
           },
-          401: { description: "Authentication required." },
-          403: { description: "Admin or tutor role required." },
+          400: errorResponseSchema,
+          401: errorResponseSchema,
+          403: errorResponseSchema,
+          500: errorResponseSchema,
         },
       },
     },
     async (request, reply) => {
       const parsed = searchQuerySchema.safeParse(request.query);
       if (!parsed.success) {
-        return reply.code(400).send({ message: "Invalid search query" });
+        return reply.code(400).send({ message: "Invalid spaces query" });
       }
       if (!request.currentUser) {
         return reply.code(401).send({ message: "Unauthorized" });
       }
 
+      const mineOnly =
+        request.currentUser.role !== "admin" || parsed.data.scope === "mine";
       const spaces = await prisma.space.findMany({
         where: {
-          ...(request.currentUser.role === "admin"
-            ? {}
-            : { creatorId: request.currentUser.id }),
+          ...(mineOnly ? { creatorId: request.currentUser.id } : {}),
           ...(parsed.data.search
             ? { name: { contains: parsed.data.search, mode: "insensitive" } }
             : {}),
         },
-        orderBy: { createdAt: "desc" },
         select: {
           id: true,
           name: true,
           creatorId: true,
           createdAt: true,
-          lastUsedAt: true,
+          sessions: {
+            orderBy: { startedAt: "desc" },
+            take: 1,
+            select: { startedAt: true },
+          },
         },
       });
 
-      return { spaces };
+      const activeSessions = spaces.length
+        ? await prisma.session.findMany({
+            where: {
+              spaceId: { in: spaces.map((space) => space.id) },
+              endedAt: null,
+            },
+            orderBy: { startedAt: "desc" },
+            select: {
+              spaceId: true,
+              _count: {
+                select: {
+                  participants: {
+                    where: {
+                      status: "admitted",
+                      classRole: { not: "observer" },
+                    },
+                  },
+                },
+              },
+            },
+          })
+        : [];
+      const liveCounts = new Map<string, number>();
+      for (const session of activeSessions) {
+        if (!liveCounts.has(session.spaceId)) {
+          liveCounts.set(session.spaceId, session._count.participants);
+        }
+      }
+
+      const result = spaces.map((space) => {
+        const peopleInClass = liveCounts.get(space.id) ?? 0;
+        return {
+          id: space.id,
+          name: space.name,
+          creatorId: space.creatorId,
+          createdAt: space.createdAt,
+          lastUsedAt: space.sessions[0]?.startedAt ?? null,
+          peopleInClass,
+          activeNow: peopleInClass > 0,
+        };
+      });
+
+      result.sort((left, right) => {
+        if (parsed.data.sort === "nameAsc") {
+          return left.name.localeCompare(right.name);
+        }
+        if (!left.lastUsedAt) return right.lastUsedAt ? 1 : 0;
+        if (!right.lastUsedAt) return -1;
+        return right.lastUsedAt.getTime() - left.lastUsedAt.getTime();
+      });
+
+      return { spaces: result };
     },
   );
 

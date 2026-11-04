@@ -12,6 +12,31 @@
 			],
 			"isBackground": false,
 			"problemMatcher": []
+		},
+		{
+			"label": "Install backend dependencies",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"--prefix",
+				"backend",
+				"install"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "Build backend",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"--prefix",
+				"backend",
+				"run",
+				"build"
+			],
+			"isBackground": false,
+			"problemMatcher": []
 		}
 	]
 }

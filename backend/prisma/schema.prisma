@@ -5,6 +5,7 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 enum UserRole {
@@ -82,6 +83,7 @@ model Participant {
   status      ParticipantStatus
   randomId    String?           @unique
   joinedAt    DateTime          @default(now())
+  admittedAt  DateTime?
   leftAt      DateTime?
 
   @@index([sessionId, status])

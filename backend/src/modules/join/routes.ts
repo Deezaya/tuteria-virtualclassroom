@@ -116,16 +116,18 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const now = new Date();
+      const latestSession = await prisma.session.findFirst({
+        where: { spaceId: space.id },
+        orderBy: { startedAt: "desc" },
+        select: { id: true, endedAt: true },
+      });
       const session =
-        (await prisma.session.findFirst({
-          where: { spaceId: space.id, endedAt: null },
-          orderBy: { startedAt: "desc" },
-          select: { id: true },
-        })) ??
-        (await prisma.session.create({
+        latestSession && !latestSession.endedAt
+          ? latestSession
+          : await prisma.session.create({
           data: { spaceId: space.id },
           select: { id: true },
-        }));
+        });
 
       const classRole = observer
         ? "observer"
@@ -145,6 +147,7 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
           displayName: observer ? null : user?.name ?? parsed.data.name,
           classRole,
           status,
+          admittedAt: status === "admitted" ? now : null,
           randomId: observer ? createObserverRandomId() : null,
         },
         select: { id: true, classRole: true, status: true },
@@ -180,8 +183,9 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
             properties: {
               status: { type: "string", enum: ["waiting", "admitted", "denied"] },
               sessionId: { type: "string" },
+              spaceId: { type: "string" },
             },
-            required: ["status", "sessionId"],
+            required: ["status", "sessionId", "spaceId"],
           },
           401: errorResponse,
           404: errorResponse,
@@ -197,7 +201,12 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
 
       const participant = await prisma.participant.findUnique({
         where: { id: participantId },
-        select: { id: true, status: true, sessionId: true },
+        select: {
+          id: true,
+          status: true,
+          sessionId: true,
+          session: { select: { spaceId: true } },
+        },
       });
       if (
         !participant ||
@@ -206,7 +215,11 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ message: "Join status not found" });
       }
 
-      return { status: participant.status, sessionId: participant.sessionId };
+      return {
+        status: participant.status,
+        sessionId: participant.sessionId,
+        spaceId: participant.session.spaceId,
+      };
     },
   );
 };

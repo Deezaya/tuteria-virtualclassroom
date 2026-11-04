@@ -4,6 +4,7 @@ import type {
   FastifyRequest,
 } from "fastify";
 import { z } from "zod";
+import { config } from "../../config.js";
 import { prisma } from "../../db.js";
 import { requireRoles } from "../../plugins/auth.js";
 import { createSpaceToken, findManageableSpace, hashSpaceToken } from "../spaces/service.js";
@@ -39,14 +40,13 @@ async function createLink(
     select: { id: true },
   });
 
-  const linkPath =
-    kind === "invite"
-      ? `/join?token=${encodeURIComponent(token)}`
-      : `/observe?token=${encodeURIComponent(token)}`;
+  const query = new URLSearchParams({ token });
+  if (kind === "observer") query.set("observer", "1");
+  const link = `${config.FRONTEND_URL.replace(/\/$/, "")}/join?${query.toString()}`;
 
   return {
     spaceId: updated.id,
-    link: linkPath,
+    link,
     message: "This link contains a one-time-visible token. Generate a new link if it is lost.",
   };
 }
@@ -60,7 +60,7 @@ export const inviteRoutes: FastifyPluginAsync = async (app) => {
         tags: ["Invites"],
         summary: "Generate an invite link (creator or admin)",
         description:
-          "Returns a relative frontend path with a new long random token. Only its hash is stored; each call rotates and invalidates the previous invite link.",
+          "Returns a frontend URL with a new long random token. Only its hash is stored; each call rotates and invalidates the previous invite link.",
         security: [{ cookieAuth: [] }],
         params: {
           type: "object",
@@ -92,7 +92,7 @@ export const inviteRoutes: FastifyPluginAsync = async (app) => {
         tags: ["Invites"],
         summary: "Generate an observer link (creator or admin)",
         description:
-          "Returns a relative frontend path with a new long random observer token. Only its hash is stored; each call rotates and invalidates the previous observer link.",
+          "Returns a frontend URL with a new long random observer token. Only its hash is stored; each call rotates and invalidates the previous observer link.",
         security: [{ cookieAuth: [] }],
         params: {
           type: "object",
@@ -121,8 +121,9 @@ export const inviteRoutes: FastifyPluginAsync = async (app) => {
     {
       schema: {
         tags: ["Invites"],
-        summary: "Resolve a public invite token to its space",
-        description: "The token is submitted in the request body and never stored in plaintext.",
+        summary: "Resolve a public invite or observer token to its space",
+        description:
+          "The token is submitted in the request body and never stored in plaintext.",
         body: {
           type: "object",
           required: ["token"],
@@ -146,7 +147,14 @@ export const inviteRoutes: FastifyPluginAsync = async (app) => {
         select: { id: true, name: true, inviteTokenHash: true },
       });
       if (!space) {
-        return reply.code(404).send({ message: "Invite not found or no longer valid" });
+        const observerSpace = await prisma.space.findUnique({
+          where: { observerTokenHash: hashSpaceToken(parsed.data.token) },
+          select: { id: true, name: true },
+        });
+        if (!observerSpace) {
+          return reply.code(404).send({ message: "Invite not found or no longer valid" });
+        }
+        return { space: { id: observerSpace.id, name: observerSpace.name } };
       }
 
       const updated = await prisma.space.updateMany({

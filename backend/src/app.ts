@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import cookie from "@fastify/cookie";
+import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
@@ -15,6 +16,11 @@ import { registerAuthDecorators } from "./plugins/auth.js";
 export function buildApp() {
   const app = Fastify({ logger: true });
   registerAuthDecorators(app);
+
+  app.register(cors, {
+    origin: config.FRONTEND_ORIGIN,
+    credentials: true,
+  });
 
   app.register(swagger, {
     openapi: {
