@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
+  LiveKitRoom,
+  ParticipantTile,
+  RoomAudioRenderer,
+  useConnectionState,
+  useLocalParticipant,
+  useRoomContext,
+  useTracks,
+} from "@livekit/components-react";
+import {
   Eye,
   EyeOff,
   Grid2X2,
@@ -13,6 +22,7 @@ import {
   X,
   Wifi,
 } from "lucide-react";
+import { ConnectionState, Track, VideoPresets, type RoomOptions } from "livekit-client";
 import {
   Link,
   Navigate,
@@ -29,6 +39,7 @@ import {
   createSpaceLink,
   deleteSpace,
   getCurrentUser,
+  getLiveKitToken,
   getJoinStatus,
   getSessionAttendance,
   getSessions,
@@ -1091,6 +1102,202 @@ function ComingSoonPage({ title }: { title: string }) {
   );
 }
 
+const roomTestOptions: RoomOptions = {
+  adaptiveStream: true,
+  dynacast: true,
+  publishDefaults: { simulcast: true },
+  videoCaptureDefaults: { resolution: VideoPresets.h144 },
+};
+
+function RoomTestPage() {
+  const [credentials, setCredentials] = useState<{
+    token: string;
+    url: string;
+    sessionId: string;
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [roomError, setRoomError] = useState("");
+  const [left, setLeft] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError("");
+    setRoomError("");
+    setLeft(false);
+    setCredentials(null);
+
+    async function connectToRoom() {
+      const [tokenResult, statusResult] = await Promise.allSettled([
+        getLiveKitToken(),
+        getJoinStatus(),
+      ]);
+      if (!active) return;
+
+      if (tokenResult.status === "rejected") {
+        const cause: unknown = tokenResult.reason;
+        if (cause instanceof ApiError && cause.status === 401) {
+          setError("You need to join a class first.");
+        } else if (cause instanceof ApiError && cause.status === 403) {
+          if (statusResult.status === "fulfilled" && statusResult.value.status === "waiting") {
+            setError("Waiting to be admitted.");
+          } else if (statusResult.status === "fulfilled" && statusResult.value.status === "denied") {
+            setError("The tutor didn’t let you in.");
+          } else {
+            setError("You need to join a class first.");
+          }
+        } else {
+          setError("We couldn’t connect to the class. Check your connection and try again.");
+        }
+        setLoading(false);
+        return;
+      }
+
+      if (statusResult.status === "rejected") {
+        setError("We couldn’t find your class session. Rejoin using the class invite link.");
+        setLoading(false);
+        return;
+      }
+
+      setCredentials({
+        ...tokenResult.value,
+        sessionId: statusResult.value.sessionId,
+      });
+      setLoading(false);
+    }
+
+    void connectToRoom();
+    return () => {
+      active = false;
+    };
+  }, [attempt]);
+
+  if (loading) {
+    return <main className="room-test-page">Connecting to LiveKit...</main>;
+  }
+
+  if (error) {
+    return (
+      <main className="room-test-page">
+        <p role="alert">{error}</p>
+        <button onClick={() => setAttempt((value) => value + 1)} type="button">Try again</button>
+      </main>
+    );
+  }
+
+  if (left || !credentials) {
+    return <main className="room-test-page">You left the class.</main>;
+  }
+
+  return (
+    <main className="room-test-page">
+      <LiveKitRoom
+        audio
+        onError={() => setRoomError("We couldn’t connect to the class. Check your connection and try again.")}
+        options={roomTestOptions}
+        serverUrl={credentials.url}
+        token={credentials.token}
+        video
+      >
+        <RoomAudioRenderer />
+        <RoomTestControls
+          error={roomError}
+          onError={setRoomError}
+          onLeft={() => {
+            setCredentials(null);
+            setLeft(true);
+          }}
+          sessionId={credentials.sessionId}
+        />
+      </LiveKitRoom>
+    </main>
+  );
+}
+
+function RoomTestControls({
+  sessionId,
+  onLeft,
+  onError,
+  error,
+}: {
+  sessionId: string;
+  onLeft: () => void;
+  onError: (message: string) => void;
+  error: string;
+}) {
+  const connectionState = useConnectionState();
+  const tracks = useTracks([Track.Source.Camera], { onlySubscribed: false });
+  const { isCameraEnabled, isMicrophoneEnabled, localParticipant } = useLocalParticipant();
+  const room = useRoomContext();
+  const [leaving, setLeaving] = useState(false);
+
+  const stateLabel = {
+    [ConnectionState.Connecting]: "connecting",
+    [ConnectionState.Connected]: "connected",
+    [ConnectionState.Reconnecting]: "reconnecting",
+    [ConnectionState.SignalReconnecting]: "reconnecting",
+    [ConnectionState.Disconnected]: "disconnected",
+  }[connectionState] ?? "disconnected";
+
+  async function toggleMicrophone() {
+    try {
+      await localParticipant.setMicrophoneEnabled(!isMicrophoneEnabled);
+    } catch {
+      onError("We couldn’t change your microphone setting.");
+    }
+  }
+
+  async function toggleCamera() {
+    try {
+      await localParticipant.setCameraEnabled(!isCameraEnabled, {
+        resolution: VideoPresets.h144,
+      });
+    } catch {
+      onError("We couldn’t change your camera setting.");
+    }
+  }
+
+  async function leave() {
+    setLeaving(true);
+    try {
+      await room.disconnect();
+      await leaveSession(sessionId);
+      onLeft();
+    } catch {
+      onError("You disconnected from video, but couldn’t update your class status. Try Leave again.");
+      setLeaving(false);
+    }
+  }
+
+  return (
+    <section className="room-test-content">
+      <p>Connection state: {stateLabel}</p>
+      {error && <p role="alert">{error}</p>}
+      <div className="room-test-tiles">
+        {tracks.map((track) => (
+          <div className="room-test-tile" key={`${track.participant.identity}-${track.source}`}>
+            <ParticipantTile trackRef={track} />
+            <span>{track.participant.name || track.participant.identity}</span>
+          </div>
+        ))}
+      </div>
+      <div className="room-test-controls">
+        <button onClick={() => void toggleMicrophone()} type="button">
+          {isMicrophoneEnabled ? "Mute microphone" : "Turn microphone on"}
+        </button>
+        <button onClick={() => void toggleCamera()} type="button">
+          {isCameraEnabled ? "Turn camera off" : "Turn camera on"}
+        </button>
+        <button disabled={leaving} onClick={() => void leave()} type="button">
+          {leaving ? "Leaving..." : "Leave"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 type JoinStep = "checking" | "signed-in" | "guest" | "waiting" | "denied" | "invalid" | "error";
 
 function JoinPage() {
@@ -1459,7 +1666,7 @@ function AuthLoading() {
 export function App() {
   const { status } = useAuth();
   const location = useLocation();
-  const publicFlowPaths = ["/join", "/lobby", "/ended"];
+  const publicFlowPaths = ["/join", "/room-test", "/lobby", "/ended"];
   if (status !== "ready" && !publicFlowPaths.includes(location.pathname)) {
     return <AuthLoading />;
   }
@@ -1469,6 +1676,7 @@ export function App() {
       <Route path="/sign-in" element={<SignInPage />} />
       <Route path="/forgot-password" element={<ForgotPasswordPage />} />
       <Route path="/join" element={<JoinPage />} />
+      <Route path="/room-test" element={<RoomTestPage />} />
       <Route path="/lobby" element={<LobbyPlaceholder />} />
       <Route path="/ended" element={<EndedPage />} />
       <Route

@@ -218,6 +218,12 @@ export function leaveSession(sessionId: string): Promise<{ status: "left"; leftA
   );
 }
 
+export function getLiveKitToken(): Promise<{ token: string; url: string }> {
+  return request<{ token: string; url: string }>("/livekit/token", {
+    method: "POST",
+  });
+}
+
 export function login(email: string, password: string): Promise<UserResponse> {
   return request<UserResponse>("/auth/login", {
     method: "POST",
