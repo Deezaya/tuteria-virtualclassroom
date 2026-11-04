@@ -81,8 +81,15 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
             required: ["session", "participant"],
           },
           400: errorResponse,
+          429: errorResponse,
           404: errorResponse,
           500: errorResponse,
+        },
+      },
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: "1 minute",
         },
       },
     },
@@ -111,9 +118,6 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
 
       const observer = observerSpace !== null;
       const user = observer ? null : await getOptionalUser(request);
-      if (!observer && !user && !parsed.data.name) {
-        return reply.code(400).send({ message: "A name is required for guests" });
-      }
 
       const now = new Date();
       const latestSession = await prisma.session.findFirst({
@@ -121,6 +125,28 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
         orderBy: { startedAt: "desc" },
         select: { id: true, endedAt: true },
       });
+      const currentParticipantId = getParticipantCookieId(request);
+      if (!observer && currentParticipantId && latestSession) {
+        const previouslyDenied = await prisma.participant.findFirst({
+          where: {
+            id: currentParticipantId,
+            sessionId: latestSession.id,
+            status: "denied",
+          },
+          select: { id: true, classRole: true, status: true },
+        });
+        if (previouslyDenied) {
+          return reply.code(201).send({
+            session: { id: latestSession.id, spaceId: space.id, spaceName: space.name },
+            participant: previouslyDenied,
+          });
+        }
+      }
+
+      if (!observer && !user && !parsed.data.name) {
+        return reply.code(400).send({ message: "A name is required for guests" });
+      }
+
       const session =
         latestSession && !latestSession.endedAt
           ? latestSession
@@ -184,8 +210,13 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
               status: { type: "string", enum: ["waiting", "admitted", "denied"] },
               sessionId: { type: "string" },
               spaceId: { type: "string" },
+              spaceName: { type: "string" },
+              classRole: {
+                type: "string",
+                enum: ["admin", "tutor", "student", "guest", "observer"],
+              },
             },
-            required: ["status", "sessionId", "spaceId"],
+            required: ["status", "sessionId", "spaceId", "spaceName", "classRole"],
           },
           401: errorResponse,
           404: errorResponse,
@@ -204,8 +235,9 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
         select: {
           id: true,
           status: true,
+          classRole: true,
           sessionId: true,
-          session: { select: { spaceId: true } },
+          session: { select: { spaceId: true, space: { select: { name: true } } } },
         },
       });
       if (
@@ -219,6 +251,8 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
         status: participant.status,
         sessionId: participant.sessionId,
         spaceId: participant.session.spaceId,
+        spaceName: participant.session.space.name,
+        classRole: participant.classRole,
       };
     },
   );

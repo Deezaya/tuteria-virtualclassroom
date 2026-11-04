@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
+import rateLimit from "@fastify/rate-limit";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import { config } from "./config.js";
@@ -20,6 +21,12 @@ export function buildApp() {
   app.register(cors, {
     origin: config.FRONTEND_ORIGIN,
     credentials: true,
+  });
+  app.register(rateLimit, {
+    global: false,
+    errorResponseBuilder: () => ({
+      message: "Too many join requests. Please wait a minute and try again.",
+    }),
   });
 
   app.register(swagger, {

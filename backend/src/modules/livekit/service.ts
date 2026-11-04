@@ -23,7 +23,10 @@ export async function createParticipantToken(participant: TokenParticipant) {
     identity: participant.id,
     ...(participant.classRole === "observer"
       ? {}
-      : { name: participant.displayName ?? undefined }),
+      : {
+          name: participant.displayName ?? undefined,
+          metadata: JSON.stringify({ role: participant.classRole }),
+        }),
     ttl: "10m",
   });
 

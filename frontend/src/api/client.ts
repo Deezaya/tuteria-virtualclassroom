@@ -126,6 +126,16 @@ export function createSpaceLink(
 }
 
 export type JoinStatus = "waiting" | "admitted" | "denied";
+export type ClassRole = "admin" | "tutor" | "student" | "guest" | "observer";
+
+export type WaitingParticipant = {
+  id: string;
+  sessionId: string;
+  displayName: string | null;
+  classRole: ClassRole;
+  status: "waiting" | "admitted" | "denied";
+  joinedAt: string;
+};
 
 export type SessionRecord = {
   id: string;
@@ -205,15 +215,48 @@ export function getJoinStatus(): Promise<{
   status: JoinStatus;
   sessionId: string;
   spaceId: string;
+  spaceName: string;
+  classRole: ClassRole;
 }> {
-  return request<{ status: JoinStatus; sessionId: string; spaceId: string }>(
+  return request<{
+    status: JoinStatus;
+    sessionId: string;
+    spaceId: string;
+    spaceName: string;
+    classRole: ClassRole;
+  }>(
     "/join/status",
+  );
+}
+
+export function getWaitingParticipants(
+  sessionId: string,
+): Promise<{ participants: WaitingParticipant[] }> {
+  return request<{ participants: WaitingParticipant[] }>(
+    `/sessions/${encodeURIComponent(sessionId)}/waiting`,
+  );
+}
+
+export function updateWaitingParticipant(
+  participantId: string,
+  action: "admit" | "deny",
+): Promise<{ participant: WaitingParticipant }> {
+  return request<{ participant: WaitingParticipant }>(
+    `/participants/${encodeURIComponent(participantId)}/${action}`,
+    { method: "POST" },
   );
 }
 
 export function leaveSession(sessionId: string): Promise<{ status: "left"; leftAt: string | null }> {
   return request<{ status: "left"; leftAt: string | null }>(
     `/sessions/${encodeURIComponent(sessionId)}/leave`,
+    { method: "POST" },
+  );
+}
+
+export function endSession(sessionId: string): Promise<{ message: string }> {
+  return request<{ message: string }>(
+    `/sessions/${encodeURIComponent(sessionId)}/end`,
     { method: "POST" },
   );
 }

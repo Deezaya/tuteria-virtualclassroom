@@ -1,3 +1,5 @@
+/// <reference types="node" />
+
 import "../src/config.js";
 import { z } from "zod";
 import { prisma } from "../src/db.js";

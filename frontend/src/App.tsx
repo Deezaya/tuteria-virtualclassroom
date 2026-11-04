@@ -3,8 +3,10 @@ import {
   LiveKitRoom,
   ParticipantTile,
   RoomAudioRenderer,
+  isTrackReference,
   useConnectionState,
   useLocalParticipant,
+  useParticipants,
   useRoomContext,
   useTracks,
 } from "@livekit/components-react";
@@ -19,10 +21,19 @@ import {
   LogOut,
   Mic,
   MicOff,
+  MessageCircle,
+  MonitorUp,
   MoreVertical,
   Plus,
+  PanelRight,
+  PictureInPicture2,
   Search,
   ChevronRight,
+  Settings,
+  Smile,
+  Hand,
+  Clock3,
+  Crown,
   UsersRound,
   Video,
   Volume2,
@@ -31,9 +42,11 @@ import {
 } from "lucide-react";
 import {
   ConnectionState,
+  DisconnectReason,
   Track,
   VideoPreset,
   VideoPresets,
+  type Participant as LiveKitParticipant,
   type RoomOptions,
 } from "livekit-client";
 import {
@@ -51,6 +64,7 @@ import {
   createSpace,
   createSpaceLink,
   deleteSpace,
+  endSession,
   getCurrentUser,
   getLiveKitToken,
   getJoinStatus,
@@ -67,6 +81,10 @@ import {
   type AttendanceRecord,
   type SessionRecord,
   type User,
+  type ClassRole,
+  type WaitingParticipant,
+  getWaitingParticipants,
+  updateWaitingParticipant,
 } from "./api/client";
 import { useAuth } from "./auth/AuthProvider";
 
@@ -1131,6 +1149,39 @@ function ComingSoonPage({ title }: { title: string }) {
   );
 }
 
+function readParticipantRole(participant: LiveKitParticipant): ClassRole | null {
+  if (!participant.metadata) return null;
+  try {
+    const metadata: unknown = JSON.parse(participant.metadata);
+    if (typeof metadata !== "object" || metadata === null || !("role" in metadata)) return null;
+    const role = metadata.role;
+    return role === "admin" || role === "tutor" || role === "student" ||
+      role === "guest" || role === "observer"
+      ? role
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatClassRole(role: ClassRole | null): string {
+  if (role === "admin") return "Tutor";
+  if (role === "tutor") return "Tutor";
+  if (role === "student") return "Student";
+  if (role === "guest") return "Guest";
+  return "Participant";
+}
+
+function getInitials(name: string): string {
+  return name
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0] ?? "")
+    .join("")
+    .toUpperCase() || "G";
+}
+
 const camera144p = new VideoPreset({
   width: 256,
   height: 144,
@@ -1150,16 +1201,20 @@ const roomTestOptions: RoomOptions = {
 };
 
 function RoomTestPage() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const joinPath = getJoinPath(location.state);
   const [mediaPreferences] = useState(() => roomMediaPreferences);
   const [credentials, setCredentials] = useState<{
     token: string;
     url: string;
     sessionId: string;
+    classRole: ClassRole;
+    spaceName: string;
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [roomError, setRoomError] = useState("");
-  const [left, setLeft] = useState(false);
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
@@ -1167,7 +1222,6 @@ function RoomTestPage() {
     setLoading(true);
     setError("");
     setRoomError("");
-    setLeft(false);
     setCredentials(null);
 
     async function connectToRoom() {
@@ -1205,6 +1259,8 @@ function RoomTestPage() {
       setCredentials({
         ...tokenResult.value,
         sessionId: statusResult.value.sessionId,
+        classRole: statusResult.value.classRole,
+        spaceName: statusResult.value.spaceName,
       });
       setLoading(false);
     }
@@ -1228,17 +1284,22 @@ function RoomTestPage() {
     );
   }
 
-  if (left || !credentials) {
-    return <main className="room-test-page">You left the class.</main>;
+  if (!credentials) {
+    return <main className="room-test-page">The class session is unavailable.</main>;
   }
 
   return (
-    <main className="room-test-page">
+    <main className="room-test-page classroom-room">
       <LiveKitRoom
         audio={mediaPreferences.microphoneEnabled
           ? { deviceId: mediaPreferences.microphoneDeviceId || undefined }
           : false}
         onError={() => setRoomError("We couldn’t connect to the class. Check your connection and try again.")}
+        onDisconnected={(reason) => {
+          if (reason === DisconnectReason.ROOM_DELETED) {
+            navigate("/ended", { replace: true, state: { joinPath } });
+          }
+        }}
         options={roomTestOptions}
         serverUrl={credentials.url}
         token={credentials.token}
@@ -1253,10 +1314,12 @@ function RoomTestPage() {
         <RoomTestControls
           error={roomError}
           onError={setRoomError}
+          classRole={credentials.classRole}
+          roomName={credentials.spaceName}
           onLeft={() => {
-            setCredentials(null);
-            setLeft(true);
+            navigate("/left", { replace: true, state: { joinPath } });
           }}
+          onEnded={() => navigate("/ended", { replace: true, state: { joinPath } })}
           speakerDeviceId={mediaPreferences.speakerDeviceId}
           sessionId={credentials.sessionId}
         />
@@ -1268,21 +1331,94 @@ function RoomTestPage() {
 function RoomTestControls({
   sessionId,
   onLeft,
+  onEnded,
   onError,
   error,
   speakerDeviceId,
+  classRole,
+  roomName,
 }: {
   sessionId: string;
   onLeft: () => void;
+  onEnded: () => void;
   onError: (message: string) => void;
   error: string;
   speakerDeviceId: string;
+  classRole: ClassRole;
+  roomName: string;
 }) {
   const connectionState = useConnectionState();
-  const tracks = useTracks([Track.Source.Camera], { onlySubscribed: false });
-  const { isCameraEnabled, isMicrophoneEnabled, localParticipant } = useLocalParticipant();
+  const cameraTracks = useTracks(
+    [{ source: Track.Source.Camera, withPlaceholder: true }],
+    { onlySubscribed: false },
+  );
+  const screenShareTracks = useTracks([Track.Source.ScreenShare], { onlySubscribed: false });
+  const participants = useParticipants();
+  const {
+    isCameraEnabled,
+    isMicrophoneEnabled,
+    isScreenShareEnabled,
+    localParticipant,
+  } = useLocalParticipant();
   const room = useRoomContext();
   const [leaving, setLeaving] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [confirmEnding, setConfirmEnding] = useState(false);
+  const [screenSharePending, setScreenSharePending] = useState(false);
+  const [layout, setLayout] = useState<"grid" | "sidebar" | "floating">("grid");
+  const [peopleOpen, setPeopleOpen] = useState(false);
+  const [waitingGuests, setWaitingGuests] = useState<WaitingParticipant[]>([]);
+  const [dismissedGuestIds, setDismissedGuestIds] = useState<Set<string>>(() => new Set());
+  const [busyGuestId, setBusyGuestId] = useState<string | null>(null);
+  const [waitingError, setWaitingError] = useState("");
+  const menuRef = useRef<HTMLDivElement>(null);
+  const isHostClassRole = classRole === "admin" || classRole === "tutor";
+  const canPublish = classRole !== "observer";
+  const visibleParticipants = participants.filter((participant) =>
+    readParticipantRole(participant) !== "observer" &&
+    !(participant.identity === localParticipant.identity && classRole === "observer"),
+  );
+  const visibleWaitingGuests = waitingGuests.filter(
+    (guest) => !dismissedGuestIds.has(guest.id),
+  );
+  const currentGuest = visibleWaitingGuests[0];
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    function closeOnOutside(event: PointerEvent) {
+      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
+    }
+    document.addEventListener("pointerdown", closeOnOutside);
+    return () => document.removeEventListener("pointerdown", closeOnOutside);
+  }, [menuOpen]);
+
+  useEffect(() => {
+    if (!isHostClassRole) {
+      setWaitingGuests([]);
+      return;
+    }
+
+    let active = true;
+    async function pollWaitingGuests() {
+      try {
+        const result = await getWaitingParticipants(sessionId);
+        if (!active) return;
+        setWaitingGuests(result.participants);
+        setWaitingError("");
+      } catch {
+        if (active) {
+          setWaitingError("We couldn’t check guest requests. Please try again.");
+        }
+      }
+    }
+
+    void pollWaitingGuests();
+    const timer = window.setInterval(() => void pollWaitingGuests(), 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [isHostClassRole, sessionId]);
 
   useEffect(() => {
     if (!speakerDeviceId || connectionState !== ConnectionState.Connected) return;
@@ -1317,46 +1453,340 @@ function RoomTestControls({
     }
   }
 
+  async function toggleScreenShare() {
+    if (screenSharePending) return;
+    setScreenSharePending(true);
+    try {
+      await localParticipant.setScreenShareEnabled(!isScreenShareEnabled);
+    } catch (cause) {
+      onError(
+        cause instanceof Error && cause.message
+          ? `We couldn’t change screen sharing: ${cause.message}`
+          : "We couldn’t change screen sharing. Check your browser permissions and try again.",
+      );
+    } finally {
+      setScreenSharePending(false);
+    }
+  }
+
+  async function respondToGuest(guest: WaitingParticipant, action: "admit" | "deny") {
+    setBusyGuestId(guest.id);
+    setWaitingError("");
+    try {
+      await updateWaitingParticipant(guest.id, action);
+      setWaitingGuests((current) => current.filter((participant) => participant.id !== guest.id));
+      setDismissedGuestIds((current) => new Set(current).add(guest.id));
+    } catch {
+      setWaitingError(`We couldn’t ${action} this guest. Please try again.`);
+    } finally {
+      setBusyGuestId(null);
+    }
+  }
+
+  function dismissGuest(guestId: string) {
+    setDismissedGuestIds((current) => new Set(current).add(guestId));
+  }
+
   async function leave() {
     setLeaving(true);
+    setMenuOpen(false);
     try {
-      await room.disconnect();
       await leaveSession(sessionId);
+      await room.disconnect();
       onLeft();
     } catch {
-      onError("You disconnected from video, but couldn’t update your class status. Try Leave again.");
+      onError("We couldn’t leave the class. Check your connection and try again.");
+      setLeaving(false);
+    }
+  }
+
+  async function endForEveryone() {
+    setLeaving(true);
+    onError("");
+    try {
+      await endSession(sessionId);
+      setConfirmEnding(false);
+      onEnded();
+    } catch {
+      onError("We couldn’t end the class. Check your connection and try again.");
       setLeaving(false);
     }
   }
 
   return (
-    <section className="room-test-content">
-      <p>Connection state: {stateLabel}</p>
-      {error && <p role="alert">{error}</p>}
-      <div className="room-test-tiles">
-        {tracks.map((track) => (
-          <div className="room-test-tile" key={`${track.participant.identity}-${track.source}`}>
-            <ParticipantTile trackRef={track} />
-            <span>{track.participant.name || track.participant.identity}</span>
-          </div>
-        ))}
+    <section className="classroom-page">
+      <header className="classroom-topbar">
+        <Logo />
+        <button className="classroom-room-tab active" type="button">
+          Main room <ChevronDown aria-hidden="true" size={13} />
+        </button>
+        <button className="classroom-topbar-icon" disabled title="Coming soon" type="button">
+          <Plus aria-hidden="true" size={18} />
+        </button>
+        <span className="classroom-connection-state">{stateLabel}</span>
+        <div className="classroom-topbar-spacer" />
+        <button className="classroom-record-pill" disabled title="Coming soon" type="button">
+          <i /> REC
+        </button>
+        <button className="classroom-topbar-icon" disabled title="Coming soon" type="button">
+          <Crown aria-hidden="true" size={17} />
+        </button>
+        <button className="classroom-topbar-icon" disabled title="Coming soon" type="button">
+          <Clock3 aria-hidden="true" size={17} />
+        </button>
+        <div className="room-leave-menu classroom-leave-menu" ref={menuRef}>
+          <button
+            aria-expanded={menuOpen}
+            aria-haspopup="menu"
+            className="room-leave-trigger"
+            disabled={leaving}
+            onClick={() => setMenuOpen((open) => !open)}
+            type="button"
+          >
+            Leave
+          </button>
+          {menuOpen && (
+            <div className="room-leave-dropdown" role="menu">
+              <button onClick={() => void leave()} role="menuitem" type="button">Leave session</button>
+              {isHostClassRole && (
+                <button
+                  className="room-end-menu-item"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setConfirmEnding(true);
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  End session for all
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </header>
+
+      <div className={`classroom-workspace layout-${layout}${isHostClassRole ? " has-layout-controls" : ""}`}>
+        <main className="classroom-board">
+          <div className="whiteboard-placeholder">Whiteboard coming next</div>
+          {error && !confirmEnding && <p className="classroom-error" role="alert">{error}</p>}
+          {isHostClassRole && waitingError && (
+            <p className="classroom-waiting-error" role="alert">{waitingError}</p>
+          )}
+          {isHostClassRole && currentGuest && (
+            <div className="classroom-admit-bar">
+              <span className="classroom-request-avatar">{getInitials(currentGuest.displayName || "Guest")}</span>
+              <strong>{currentGuest.displayName || "A guest"} wants to join as a guest</strong>
+              {visibleWaitingGuests.length > 1 && (
+                <span className="classroom-more-waiting">+{visibleWaitingGuests.length - 1} more waiting</span>
+              )}
+              <button
+                className="classroom-admit-button"
+                disabled={busyGuestId === currentGuest.id}
+                onClick={() => void respondToGuest(currentGuest, "admit")}
+                type="button"
+              >
+                Admit
+              </button>
+              <button
+                className="classroom-deny-button"
+                disabled={busyGuestId === currentGuest.id}
+                onClick={() => void respondToGuest(currentGuest, "deny")}
+                type="button"
+              >
+                Deny
+              </button>
+              <button
+                aria-label="Dismiss guest request"
+                className="classroom-dismiss-request"
+                onClick={() => dismissGuest(currentGuest.id)}
+                type="button"
+              >
+                <X aria-hidden="true" size={15} />
+              </button>
+            </div>
+          )}
+        </main>
+
+        <aside className="classroom-side-panel">
+          {peopleOpen ? (
+            <div className="classroom-people-panel">
+              <header>
+                <div>
+                  <strong>People</strong>
+                  <span>{visibleParticipants.length} people in class</span>
+                </div>
+                <button aria-label="Close people panel" onClick={() => setPeopleOpen(false)} type="button">
+                  <X aria-hidden="true" size={17} />
+                </button>
+              </header>
+              <div className="classroom-people-section">
+                <span className="classroom-section-label">MAIN ROOM · {visibleParticipants.length}</span>
+                {visibleParticipants.map((participant, index) => {
+                  const isYou = participant.identity === localParticipant.identity;
+                  const role = readParticipantRole(participant) ?? (isYou ? classRole : null);
+                  const name = participant.name || participant.identity;
+                  const muted = !participant.getTrackPublication(Track.Source.Microphone) ||
+                    participant.getTrackPublication(Track.Source.Microphone)?.isMuted;
+                  return (
+                    <div className="classroom-person-row" key={participant.identity}>
+                      <span className={`classroom-person-avatar avatar-color-${index % 4}`}>{getInitials(name)}</span>
+                      <span className="classroom-person-copy">
+                        <strong>{name}{isYou ? " (you)" : ""}</strong>
+                        <span>{formatClassRole(role)}{muted ? " · Muted" : ""}</span>
+                      </span>
+                      {!isYou && (
+                        <button aria-label={`${name} options`} className="classroom-person-menu" disabled title="Coming soon" type="button">
+                          <MoreVertical aria-hidden="true" size={16} />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="classroom-video-panel">
+              <header className="classroom-video-heading">
+                <strong>{roomName || "Main room"}</strong>
+                <span>{visibleParticipants.length} people</span>
+              </header>
+              <div className={`classroom-video-grid ${layout === "sidebar" ? "single-column" : ""}`}>
+                {visibleParticipants.map((participant, index) => {
+                  const isYou = participant.identity === localParticipant.identity;
+                  const role = readParticipantRole(participant) ?? (isYou ? classRole : null);
+                  const name = participant.name || participant.identity;
+                  const cameraTrack = cameraTracks.find((track) =>
+                    track.participant.identity === participant.identity &&
+                    isTrackReference(track) &&
+                    Boolean(track.publication.track) &&
+                    !track.publication.isMuted,
+                  );
+                  const screenShareTrack = screenShareTracks.find(
+                    (track) => track.participant.identity === participant.identity,
+                  );
+                  const videoTrack = cameraTrack ?? screenShareTrack;
+                  const muted = !participant.getTrackPublication(Track.Source.Microphone) ||
+                    participant.getTrackPublication(Track.Source.Microphone)?.isMuted;
+                  return (
+                    <article
+                      className={`classroom-video-tile${participant.isSpeaking ? " speaking" : ""}${layout === "floating" ? " floating-tile" : ""}`}
+                      key={participant.identity}
+                    >
+                      {videoTrack ? (
+                        <ParticipantTile
+                          className="classroom-video-track"
+                          disableSpeakingIndicator
+                          trackRef={videoTrack}
+                        />
+                      ) : (
+                        <span className={`classroom-tile-avatar avatar-color-${index % 4}`}>{getInitials(name)}</span>
+                      )}
+                      <div className="classroom-tile-footer">
+                        <span>{name}{isYou ? " (you)" : ""}</span>
+                        {role === "guest" && <em>Guest</em>}
+                        {muted && <MicOff aria-label="Microphone muted" size={13} />}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </aside>
+
+        {isHostClassRole && (
+          <nav aria-label="Participant layout" className="classroom-layout-bar">
+            <button aria-label="Grid layout" aria-pressed={layout === "grid"} className={layout === "grid" ? "selected" : ""} onClick={() => setLayout("grid")} title="Grid" type="button">
+              <Grid2X2 aria-hidden="true" size={17} />
+            </button>
+            <button aria-label="Sidebar layout" aria-pressed={layout === "sidebar"} className={layout === "sidebar" ? "selected" : ""} onClick={() => setLayout("sidebar")} title="Sidebar" type="button">
+              <PanelRight aria-hidden="true" size={17} />
+            </button>
+            <button aria-label="Floating layout" aria-pressed={layout === "floating"} className={layout === "floating" ? "selected" : ""} onClick={() => setLayout("floating")} title="Floating" type="button">
+              <PictureInPicture2 aria-hidden="true" size={17} />
+            </button>
+          </nav>
+        )}
+
+        <nav aria-label="Classroom tools" className="classroom-action-bar">
+          <button aria-label="Settings" disabled title="Coming soon" type="button"><Settings aria-hidden="true" size={17} /></button>
+          <button
+            aria-label={isScreenShareEnabled ? "Stop sharing screen" : "Share screen"}
+            className={isScreenShareEnabled ? "selected" : ""}
+            disabled={!canPublish || screenSharePending}
+            onClick={() => void toggleScreenShare()}
+            title={
+              !canPublish
+                ? "Observers cannot share"
+                : screenSharePending
+                  ? "Waiting for screen selection"
+                  : isScreenShareEnabled
+                    ? "Stop sharing screen"
+                    : "Share screen"
+            }
+            type="button"
+          >
+            <MonitorUp aria-hidden="true" size={17} />
+          </button>
+          <button aria-label={isMicrophoneEnabled ? "Mute microphone" : "Turn microphone on"} className={isMicrophoneEnabled ? "" : "control-off"} disabled={!canPublish} onClick={() => void toggleMicrophone()} title={canPublish ? (isMicrophoneEnabled ? "Mute microphone" : "Turn microphone on") : "Observers cannot publish"} type="button">
+            {isMicrophoneEnabled ? <Mic aria-hidden="true" size={17} /> : <MicOff aria-hidden="true" size={17} />}
+          </button>
+          <button aria-label={isCameraEnabled ? "Turn camera off" : "Turn camera on"} className={isCameraEnabled ? "" : "control-off"} disabled={!canPublish} onClick={() => void toggleCamera()} title={canPublish ? (isCameraEnabled ? "Turn camera off" : "Turn camera on") : "Observers cannot publish"} type="button">
+            {isCameraEnabled ? <Video aria-hidden="true" size={17} /> : <CameraOff aria-hidden="true" size={17} />}
+          </button>
+          <button aria-label="Raise hand" disabled title="Coming soon" type="button"><Hand aria-hidden="true" size={17} /></button>
+          <button aria-label="Reactions" disabled title="Coming soon" type="button"><Smile aria-hidden="true" size={17} /></button>
+          <button aria-label={peopleOpen ? "Close people panel" : "Open people panel"} className={peopleOpen ? "selected" : ""} onClick={() => setPeopleOpen((open) => !open)} title="People" type="button">
+            <UsersRound aria-hidden="true" size={17} />
+          </button>
+          <button aria-label="Chat" disabled title="Coming soon" type="button"><MessageCircle aria-hidden="true" size={17} /></button>
+        </nav>
       </div>
-      <div className="room-test-controls">
-        <button onClick={() => void toggleMicrophone()} type="button">
-          {isMicrophoneEnabled ? "Mute microphone" : "Turn microphone on"}
-        </button>
-        <button onClick={() => void toggleCamera()} type="button">
-          {isCameraEnabled ? "Turn camera off" : "Turn camera on"}
-        </button>
-        <button disabled={leaving} onClick={() => void leave()} type="button">
-          {leaving ? "Leaving..." : "Leave"}
-        </button>
-      </div>
+
+      {confirmEnding && (
+        <div className="dialog-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !leaving) setConfirmEnding(false);
+        }}>
+          <section aria-labelledby="end-session-title" aria-modal="true" className="space-dialog" role="dialog">
+            <span className="eyebrow destructive-eyebrow">END SESSION</span>
+            <h2 id="end-session-title">End the class for everyone?</h2>
+            <p className="delete-confirmation">Everyone leaves now and recording stops. Boards are saved.</p>
+            {error && <p className="dialog-error" role="alert">{error}</p>}
+            <div className="dialog-actions">
+              <button className="secondary-button" disabled={leaving} onClick={() => setConfirmEnding(false)} type="button">Cancel</button>
+              <button className="destructive-button" disabled={leaving} onClick={() => void endForEveryone()} type="button">
+                {leaving ? "Ending..." : "End for all"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </section>
   );
 }
 
 type JoinStep = "checking" | "signed-in" | "guest" | "waiting" | "denied" | "invalid" | "error";
+
+function getJoinPath(state: unknown): string | null {
+  if (
+    typeof state === "object" &&
+    state !== null &&
+    "joinPath" in state &&
+    typeof state.joinPath === "string" &&
+    state.joinPath.startsWith("/join?")
+  ) {
+    return state.joinPath;
+  }
+  return null;
+}
+
+function joinFailureMessage(cause: unknown, fallback: string): string {
+  if (cause instanceof ApiError && cause.status === 429) {
+    return "Too many join requests. Please wait a minute and try again.";
+  }
+  return fallback;
+}
 
 function JoinPage() {
   const { user, logout } = useAuth();
@@ -1364,6 +1794,7 @@ function JoinPage() {
   const navigate = useNavigate();
   const query = new URLSearchParams(location.search);
   const token = query.get("token");
+  const joinPath = `${location.pathname}${location.search}`;
   const observer = query.get("observer") === "1";
   const [step, setStep] = useState<JoinStep>("checking");
   const [spaceName, setSpaceName] = useState("");
@@ -1372,7 +1803,6 @@ function JoinPage() {
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [signedIn, setSignedIn] = useState(false);
   const [signedInName, setSignedInName] = useState("");
 
   useEffect(() => {
@@ -1404,13 +1834,13 @@ function JoinPage() {
           if (!active) return;
           setSessionId(result.session.id);
           if (result.participant.status === "admitted") {
-            navigate("/lobby", { state: { spaceName: resolvedSpace.name, fromJoin: true } });
+            navigate("/lobby", { state: { spaceName: resolvedSpace.name, fromJoin: true, joinPath } });
           } else {
             setStep(result.participant.status);
           }
-        } catch {
+        } catch (cause) {
           if (active) {
-            setError("We couldn’t join as an observer. Check your connection and try again.");
+            setError(joinFailureMessage(cause, "We couldn’t join as an observer. Check your connection and try again."));
             setStep("error");
           }
         }
@@ -1434,14 +1864,18 @@ function JoinPage() {
       }
       if (!active) return;
 
-      setSignedIn(Boolean(currentUser));
       setSignedInName(currentUser?.name ?? "");
       try {
         const existing = await getJoinStatus();
         if (!active) return;
-        if (existing.status === "waiting" && existing.spaceId === resolvedSpace.id) {
+        if (existing.spaceId === resolvedSpace.id && existing.status === "waiting") {
           setSessionId(existing.sessionId);
           setStep("waiting");
+          return;
+        }
+        if (existing.spaceId === resolvedSpace.id && existing.status === "denied") {
+          setSessionId(existing.sessionId);
+          setStep("denied");
           return;
         }
       } catch (cause) {
@@ -1460,7 +1894,7 @@ function JoinPage() {
     return () => {
       active = false;
     };
-  }, [attempt, location.search, navigate, observer, token]);
+  }, [attempt, joinPath, location.search, navigate, observer, token]);
 
   useEffect(() => {
     if (step !== "waiting" || !sessionId) return;
@@ -1471,7 +1905,7 @@ function JoinPage() {
           if (!active) return;
           setSessionId(result.sessionId);
           if (result.status === "admitted") {
-            navigate("/lobby", { state: { spaceName, fromJoin: true } });
+            navigate("/lobby", { state: { spaceName, fromJoin: true, joinPath } });
           } else if (result.status === "denied") {
             setStep("denied");
           }
@@ -1487,7 +1921,7 @@ function JoinPage() {
       active = false;
       window.clearInterval(timer);
     };
-  }, [navigate, sessionId, spaceName, step]);
+  }, [joinPath, navigate, sessionId, spaceName, step]);
 
   async function submitJoin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1498,12 +1932,12 @@ function JoinPage() {
       const result = await joinSpace(token, name.trim());
       setSessionId(result.session.id);
       if (result.participant.status === "admitted") {
-        navigate("/lobby", { state: { spaceName, fromJoin: true } });
+        navigate("/lobby", { state: { spaceName, fromJoin: true, joinPath } });
       } else {
         setStep(result.participant.status);
       }
-    } catch {
-      setError("We couldn’t join this class. Check your connection and try again.");
+    } catch (cause) {
+      setError(joinFailureMessage(cause, "We couldn’t join this class. Check your connection and try again."));
     } finally {
       setBusy(false);
     }
@@ -1517,12 +1951,12 @@ function JoinPage() {
       const result = await joinSpace(token);
       setSessionId(result.session.id);
       if (result.participant.status === "admitted") {
-        navigate("/lobby", { state: { spaceName, fromJoin: true } });
+        navigate("/lobby", { state: { spaceName, fromJoin: true, joinPath } });
       } else {
         setStep(result.participant.status);
       }
-    } catch {
-      setError("We couldn’t join this class. Check your connection and try again.");
+    } catch (cause) {
+      setError(joinFailureMessage(cause, "We couldn’t join this class. Check your connection and try again."));
     } finally {
       setBusy(false);
     }
@@ -1533,7 +1967,6 @@ function JoinPage() {
     setError("");
     try {
       await logout();
-      setSignedIn(false);
       setName("");
       setStep("guest");
     } catch {
@@ -1549,9 +1982,7 @@ function JoinPage() {
     setError("");
     try {
       await leaveSession(sessionId);
-      setSessionId(null);
-      setStep(signedIn ? "signed-in" : "guest");
-      setName("");
+      navigate("/left", { replace: true, state: { joinPath } });
     } catch {
       setError("We couldn’t leave the class. Check your connection and try again.");
     } finally {
@@ -1594,8 +2025,11 @@ function JoinPage() {
       <JoinPageFrame>
         <div className="join-icon"><UsersRound aria-hidden="true" size={25} /></div>
         <span className="eyebrow">ALMOST THERE</span>
-        <h1>Waiting for the tutor to let you in</h1>
+        <h1>Waiting to be let in</h1>
         <p className="join-space-name">{spaceName}</p>
+        <p className="waiting-copy">The tutor will let you in shortly. Keep this page open, we’ll bring you in automatically.</p>
+        <div aria-label="Waiting" className="waiting-dots"><i /><i /><i /></div>
+        <p className="waiting-tip">Your camera and microphone stay off until you’re in.</p>
         {error && <p className="join-error" role="alert">{error}</p>}
         <button className="secondary-button join-secondary" disabled={busy} onClick={() => void leaveWaitingRoom()} type="button">
           {busy ? "Leaving..." : "Leave"}
@@ -1608,8 +2042,10 @@ function JoinPage() {
     return (
       <JoinPageFrame>
         <div className="join-icon"><UsersRound aria-hidden="true" size={25} /></div>
-        <h1>The tutor didn’t let you in</h1>
-        <p className="join-space-name">{spaceName}</p>
+        <h1>The tutor couldn’t let you in this time</h1>
+        <button className="join-back-link" onClick={() => navigate(-1)} type="button">
+          <span aria-hidden="true">‹</span> Back
+        </button>
       </JoinPageFrame>
     );
   }
@@ -1675,9 +2111,15 @@ function JoinPage() {
   );
 }
 
-function JoinPageFrame({ children }: { children: ReactNode }) {
+function JoinPageFrame({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
   return (
-    <main className="join-page">
+    <main className={`join-page${className ? ` ${className}` : ""}`}>
       <header className="signin-brand"><Logo /></header>
       <section className="join-card">{children}</section>
       <p className="low-data-note"><Wifi aria-hidden="true" size={15} /> Optimised for low-bandwidth connections</p>
@@ -1727,6 +2169,7 @@ function LobbyPage() {
     typeof pageState.spaceName === "string"
       ? pageState.spaceName
       : "";
+  const joinPath = getJoinPath(pageState);
 
   useEffect(() => {
     let active = true;
@@ -1930,7 +2373,7 @@ function LobbyPage() {
       microphoneDeviceId,
       speakerDeviceId,
     };
-    navigate("/room-test");
+    navigate("/room-test", { state: { joinPath } });
   }
 
   const permissionNeeded =
@@ -2111,12 +2554,33 @@ function LobbyPage() {
 }
 
 function EndedPage() {
-  const { user } = useAuth();
+  const location = useLocation();
+  return <ClassExitPage title="Class ended" joinPath={getJoinPath(location.state)} />;
+}
+
+function LeftPage() {
+  const location = useLocation();
+  return <ClassExitPage title="You left the class" joinPath={getJoinPath(location.state)} />;
+}
+
+function ClassExitPage({
+  title,
+  joinPath,
+}: {
+  title: "Class ended" | "You left the class";
+  joinPath: string | null;
+}) {
+  const { user, status } = useAuth();
+  if (status === "loading") {
+    return <JoinPageFrame><p className="join-loading">Checking your sign-in...</p></JoinPageFrame>;
+  }
+
   return (
-    <JoinPageFrame>
-      <div className="join-icon"><Video aria-hidden="true" size={25} /></div>
-      <h1>This class has ended</h1>
+    <JoinPageFrame className="class-exit-page">
+      <h1>{title}</h1>
+      <p className="exit-card-copy">Boards and chat are saved in this space.</p>
       {user && <Link className="primary-button join-primary" to="/spaces">Back to Spaces</Link>}
+      {joinPath && <Link className="class-ended-rejoin" to={joinPath}>Rejoin class</Link>}
     </JoinPageFrame>
   );
 }
@@ -2140,7 +2604,7 @@ function AuthLoading() {
 export function App() {
   const { status } = useAuth();
   const location = useLocation();
-  const publicFlowPaths = ["/join", "/room-test", "/lobby", "/ended"];
+  const publicFlowPaths = ["/join", "/room-test", "/lobby", "/left", "/ended"];
   if (status !== "ready" && !publicFlowPaths.includes(location.pathname)) {
     return <AuthLoading />;
   }
@@ -2152,6 +2616,7 @@ export function App() {
       <Route path="/join" element={<JoinPage />} />
       <Route path="/room-test" element={<RoomTestPage />} />
       <Route path="/lobby" element={<LobbyPage />} />
+      <Route path="/left" element={<LeftPage />} />
       <Route path="/ended" element={<EndedPage />} />
       <Route
         element={
