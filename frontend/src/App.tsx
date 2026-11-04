@@ -9,20 +9,33 @@ import {
   useTracks,
 } from "@livekit/components-react";
 import {
+  Camera,
+  CameraOff,
+  ChevronDown,
   Eye,
   EyeOff,
   Grid2X2,
   List,
+  LogOut,
+  Mic,
+  MicOff,
   MoreVertical,
   Plus,
   Search,
   ChevronRight,
   UsersRound,
   Video,
+  Volume2,
   X,
   Wifi,
 } from "lucide-react";
-import { ConnectionState, Track, VideoPresets, type RoomOptions } from "livekit-client";
+import {
+  ConnectionState,
+  Track,
+  VideoPreset,
+  VideoPresets,
+  type RoomOptions,
+} from "livekit-client";
 import {
   Link,
   Navigate,
@@ -56,6 +69,22 @@ import {
   type User,
 } from "./api/client";
 import { useAuth } from "./auth/AuthProvider";
+
+type RoomMediaPreferences = {
+  cameraEnabled: boolean;
+  microphoneEnabled: boolean;
+  cameraDeviceId: string;
+  microphoneDeviceId: string;
+  speakerDeviceId: string;
+};
+
+let roomMediaPreferences: RoomMediaPreferences = {
+  cameraEnabled: true,
+  microphoneEnabled: true,
+  cameraDeviceId: "",
+  microphoneDeviceId: "",
+  speakerDeviceId: "",
+};
 
 function Logo() {
   return (
@@ -1102,14 +1131,26 @@ function ComingSoonPage({ title }: { title: string }) {
   );
 }
 
+const camera144p = new VideoPreset({
+  width: 256,
+  height: 144,
+  maxBitrate: 150_000,
+  maxFramerate: 15,
+});
+
 const roomTestOptions: RoomOptions = {
   adaptiveStream: true,
   dynacast: true,
-  publishDefaults: { simulcast: true },
-  videoCaptureDefaults: { resolution: VideoPresets.h144 },
+  publishDefaults: {
+    simulcast: true,
+    videoEncoding: camera144p.encoding,
+    videoSimulcastLayers: [VideoPresets.h90],
+  },
+  videoCaptureDefaults: { resolution: camera144p.resolution },
 };
 
 function RoomTestPage() {
+  const [mediaPreferences] = useState(() => roomMediaPreferences);
   const [credentials, setCredentials] = useState<{
     token: string;
     url: string;
@@ -1194,12 +1235,19 @@ function RoomTestPage() {
   return (
     <main className="room-test-page">
       <LiveKitRoom
-        audio
+        audio={mediaPreferences.microphoneEnabled
+          ? { deviceId: mediaPreferences.microphoneDeviceId || undefined }
+          : false}
         onError={() => setRoomError("We couldn’t connect to the class. Check your connection and try again.")}
         options={roomTestOptions}
         serverUrl={credentials.url}
         token={credentials.token}
-        video
+        video={mediaPreferences.cameraEnabled
+          ? {
+              deviceId: mediaPreferences.cameraDeviceId || undefined,
+              resolution: camera144p.resolution,
+            }
+          : false}
       >
         <RoomAudioRenderer />
         <RoomTestControls
@@ -1209,6 +1257,7 @@ function RoomTestPage() {
             setCredentials(null);
             setLeft(true);
           }}
+          speakerDeviceId={mediaPreferences.speakerDeviceId}
           sessionId={credentials.sessionId}
         />
       </LiveKitRoom>
@@ -1221,17 +1270,26 @@ function RoomTestControls({
   onLeft,
   onError,
   error,
+  speakerDeviceId,
 }: {
   sessionId: string;
   onLeft: () => void;
   onError: (message: string) => void;
   error: string;
+  speakerDeviceId: string;
 }) {
   const connectionState = useConnectionState();
   const tracks = useTracks([Track.Source.Camera], { onlySubscribed: false });
   const { isCameraEnabled, isMicrophoneEnabled, localParticipant } = useLocalParticipant();
   const room = useRoomContext();
   const [leaving, setLeaving] = useState(false);
+
+  useEffect(() => {
+    if (!speakerDeviceId || connectionState !== ConnectionState.Connected) return;
+    void room.switchActiveDevice("audiooutput", speakerDeviceId).catch(() => {
+      onError("We couldn’t select that speaker. Your default speaker is still available.");
+    });
+  }, [connectionState, onError, room, speakerDeviceId]);
 
   const stateLabel = {
     [ConnectionState.Connecting]: "connecting",
@@ -1252,7 +1310,7 @@ function RoomTestControls({
   async function toggleCamera() {
     try {
       await localParticipant.setCameraEnabled(!isCameraEnabled, {
-        resolution: VideoPresets.h144,
+        resolution: camera144p.resolution,
       });
     } catch {
       onError("We couldn’t change your camera setting.");
@@ -1346,7 +1404,7 @@ function JoinPage() {
           if (!active) return;
           setSessionId(result.session.id);
           if (result.participant.status === "admitted") {
-            navigate("/lobby", { replace: true });
+            navigate("/lobby", { state: { spaceName: resolvedSpace.name, fromJoin: true } });
           } else {
             setStep(result.participant.status);
           }
@@ -1413,7 +1471,7 @@ function JoinPage() {
           if (!active) return;
           setSessionId(result.sessionId);
           if (result.status === "admitted") {
-            navigate("/lobby", { replace: true });
+            navigate("/lobby", { state: { spaceName, fromJoin: true } });
           } else if (result.status === "denied") {
             setStep("denied");
           }
@@ -1429,7 +1487,7 @@ function JoinPage() {
       active = false;
       window.clearInterval(timer);
     };
-  }, [navigate, sessionId, step]);
+  }, [navigate, sessionId, spaceName, step]);
 
   async function submitJoin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1440,7 +1498,7 @@ function JoinPage() {
       const result = await joinSpace(token, name.trim());
       setSessionId(result.session.id);
       if (result.participant.status === "admitted") {
-        navigate("/lobby", { replace: true });
+        navigate("/lobby", { state: { spaceName, fromJoin: true } });
       } else {
         setStep(result.participant.status);
       }
@@ -1459,7 +1517,7 @@ function JoinPage() {
       const result = await joinSpace(token);
       setSessionId(result.session.id);
       if (result.participant.status === "admitted") {
-        navigate("/lobby", { replace: true });
+        navigate("/lobby", { state: { spaceName, fromJoin: true } });
       } else {
         setStep(result.participant.status);
       }
@@ -1627,12 +1685,428 @@ function JoinPageFrame({ children }: { children: ReactNode }) {
   );
 }
 
-function LobbyPlaceholder() {
+type LobbyDeviceState = "checking" | "ready" | "off" | "denied" | "missing";
+
+function isPermissionFailure(cause: unknown): boolean {
+  return cause instanceof DOMException &&
+    (cause.name === "NotAllowedError" || cause.name === "PermissionDeniedError" || cause.name === "SecurityError");
+}
+
+function LobbyPage() {
+  const { user, logout } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const previewRef = useRef<HTMLVideoElement>(null);
+  const [checking, setChecking] = useState(true);
+  const [cameraEnabled, setCameraEnabled] = useState(true);
+  const [microphoneEnabled, setMicrophoneEnabled] = useState(true);
+  const [cameraDeviceId, setCameraDeviceId] = useState("");
+  const [microphoneDeviceId, setMicrophoneDeviceId] = useState("");
+  const [speakerDeviceId, setSpeakerDeviceId] = useState("");
+  const [cameraState, setCameraState] = useState<LobbyDeviceState>("checking");
+  const [microphoneState, setMicrophoneState] = useState<LobbyDeviceState>("checking");
+  const [cameraPermissionDenied, setCameraPermissionDenied] = useState(false);
+  const [microphonePermissionDenied, setMicrophonePermissionDenied] = useState(false);
+  const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
+  const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([]);
+  const [speakers, setSpeakers] = useState<MediaDeviceInfo[]>([]);
+  const [permissionAttempt, setPermissionAttempt] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [speakerTestRunning, setSpeakerTestRunning] = useState(false);
+  const pageState: unknown = location.state;
+  const fromJoin =
+    typeof pageState === "object" &&
+    pageState !== null &&
+    "fromJoin" in pageState &&
+    pageState.fromJoin === true;
+  const spaceName =
+    typeof pageState === "object" &&
+    pageState !== null &&
+    "spaceName" in pageState &&
+    typeof pageState.spaceName === "string"
+      ? pageState.spaceName
+      : "";
+
+  useEffect(() => {
+    let active = true;
+    function returnToJoin() {
+      if (fromJoin) {
+        navigate(-1);
+      } else {
+        navigate("/join", { replace: true });
+      }
+    }
+    getJoinStatus()
+      .then((result) => {
+        if (!active) return;
+        if (result.status !== "admitted") {
+          returnToJoin();
+          return;
+        }
+        setChecking(false);
+      })
+      .catch(() => {
+        if (active) returnToJoin();
+      });
+    return () => {
+      active = false;
+    };
+  }, [fromJoin, navigate]);
+
+  useEffect(() => {
+    if (checking) return;
+    let active = true;
+    let cameraStream: MediaStream | null = null;
+    let cameraTrack: MediaStreamTrack | null = null;
+    let cameraTrackEndedHandler: (() => void) | null = null;
+    let microphoneStream: MediaStream | null = null;
+
+    async function initializeDevices() {
+      setCameraState(cameraEnabled ? "checking" : "off");
+      setMicrophoneState(microphoneEnabled ? "checking" : "off");
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setCameraState("missing");
+        setMicrophoneState("missing");
+        setCameraEnabled(false);
+        setMicrophoneEnabled(false);
+        return;
+      }
+      const tasks: Promise<void>[] = [];
+
+      if (cameraEnabled) {
+        tasks.push(
+          navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: cameraDeviceId ? { deviceId: { exact: cameraDeviceId } } : true,
+          }).then((stream) => {
+            if (!active) {
+              stream.getTracks().forEach((track) => track.stop());
+              return;
+            }
+            const videoTrack = stream.getVideoTracks().find((track) => track.readyState === "live");
+            if (!videoTrack) {
+              stream.getTracks().forEach((track) => track.stop());
+              setCameraState("missing");
+              setCameraEnabled(false);
+              return;
+            }
+            const videoElement = previewRef.current;
+            if (!videoElement) {
+              stream.getTracks().forEach((track) => track.stop());
+              setCameraState("missing");
+              setCameraEnabled(false);
+              return;
+            }
+            cameraStream = stream;
+            cameraTrack = videoTrack;
+            cameraTrackEndedHandler = () => {
+              if (!active) return;
+              setCameraState("missing");
+              setCameraEnabled(false);
+            };
+            videoTrack.addEventListener("ended", cameraTrackEndedHandler);
+            videoElement.srcObject = stream;
+            void videoElement.play().catch(() => undefined);
+            setCameraState("ready");
+            setCameraPermissionDenied(false);
+          }).catch((cause: unknown) => {
+            if (!active) return;
+            const denied = isPermissionFailure(cause);
+            setCameraState(denied ? "denied" : "missing");
+            setCameraPermissionDenied(denied);
+          }),
+        );
+      } else if (previewRef.current) {
+        previewRef.current.srcObject = null;
+      }
+
+      if (microphoneEnabled) {
+        tasks.push(
+          navigator.mediaDevices.getUserMedia({
+            audio: microphoneDeviceId ? { deviceId: { exact: microphoneDeviceId } } : true,
+            video: false,
+          }).then((stream) => {
+            if (!active) {
+              stream.getTracks().forEach((track) => track.stop());
+              return;
+            }
+            microphoneStream = stream;
+            setMicrophoneState("ready");
+            setMicrophonePermissionDenied(false);
+          }).catch((cause: unknown) => {
+            if (!active) return;
+            const denied = isPermissionFailure(cause);
+            setMicrophoneState(denied ? "denied" : "missing");
+            setMicrophonePermissionDenied(denied);
+          }),
+        );
+      }
+
+      await Promise.all(tasks);
+      if (!active) return;
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        if (!active) return;
+        setCameras(devices.filter((device) => device.kind === "videoinput"));
+        setMicrophones(devices.filter((device) => device.kind === "audioinput"));
+        setSpeakers(devices.filter((device) => device.kind === "audiooutput"));
+      } catch {
+        if (active) {
+          setCameras([]);
+          setMicrophones([]);
+          setSpeakers([]);
+        }
+      }
+    }
+
+    void initializeDevices();
+    return () => {
+      active = false;
+      if (cameraTrack && cameraTrackEndedHandler) {
+        cameraTrack.removeEventListener("ended", cameraTrackEndedHandler);
+      }
+      cameraStream?.getTracks().forEach((track) => track.stop());
+      microphoneStream?.getTracks().forEach((track) => track.stop());
+      if (previewRef.current?.srcObject === cameraStream) {
+        previewRef.current.srcObject = null;
+      }
+    };
+  }, [
+    cameraDeviceId,
+    cameraEnabled,
+    checking,
+    microphoneDeviceId,
+    microphoneEnabled,
+    permissionAttempt,
+  ]);
+
+  async function testSpeakers() {
+    setSpeakerTestRunning(true);
+    try {
+      const audioContext = new AudioContext();
+      const selectableContext = audioContext as AudioContext & {
+        setSinkId?: (deviceId: string) => Promise<void>;
+      };
+      if (speakerDeviceId && selectableContext.setSinkId) {
+        await selectableContext.setSinkId(speakerDeviceId);
+      }
+      await audioContext.resume();
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.frequency.value = 660;
+      gain.gain.value = 0.08;
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      oscillator.onended = () => {
+        void audioContext.close();
+        setSpeakerTestRunning(false);
+      };
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + 0.35);
+    } catch {
+      setSpeakerTestRunning(false);
+      setError("Speaker testing isn’t available in this browser.");
+    }
+  }
+
+  async function logOut() {
+    setBusy(true);
+    setError("");
+    try {
+      await logout();
+      navigate("/sign-in", { replace: true });
+    } catch {
+      setError("We couldn’t log you out. Please try again.");
+      setBusy(false);
+    }
+  }
+
+  function joinClass() {
+    roomMediaPreferences = {
+      cameraEnabled: cameraEnabled && cameraState === "ready",
+      microphoneEnabled: microphoneEnabled && microphoneState === "ready",
+      cameraDeviceId,
+      microphoneDeviceId,
+      speakerDeviceId,
+    };
+    navigate("/room-test");
+  }
+
+  const permissionNeeded =
+    cameraState === "checking" ||
+    microphoneState === "checking" ||
+    cameraPermissionDenied ||
+    microphonePermissionDenied;
+  const mediaChecking = cameraState === "checking" || microphoneState === "checking";
+
+  if (checking) {
+    return (
+      <JoinPageFrame>
+        <p className="join-loading">Checking your place in the class...</p>
+      </JoinPageFrame>
+    );
+  }
+
   return (
-    <JoinPageFrame>
-      <div className="join-icon"><Video aria-hidden="true" size={25} /></div>
-      <h1>Camera and microphone check coming next</h1>
-    </JoinPageFrame>
+    <main className="lobby-page">
+      <header className="lobby-header">
+        <Logo />
+        <button className="lobby-back" onClick={() => navigate(-1)} type="button">
+          <ChevronRight aria-hidden="true" size={16} /> Back
+        </button>
+      </header>
+      <div className="lobby-layout">
+        <section className="lobby-preview-column">
+          <div className={`lobby-preview${cameraState !== "ready" ? " camera-unavailable" : ""}`}>
+            <video autoPlay muted playsInline ref={previewRef} />
+            {cameraState !== "ready" && (
+              <div className="lobby-avatar" aria-label="Camera preview unavailable">
+                <span />
+                <i />
+              </div>
+            )}
+            <strong>{user?.name || "Guest"}</strong>
+            <span className="lobby-network"><Wifi aria-hidden="true" size={14} /> Ready to connect</span>
+          </div>
+          <div className="lobby-toggle-row">
+            <button
+              aria-checked={microphoneEnabled && microphoneState === "ready"}
+              className="lobby-toggle"
+              role="switch"
+              onClick={() => {
+                if (microphoneState === "ready") {
+                  setMicrophoneEnabled((enabled) => !enabled);
+                } else {
+                  setMicrophoneEnabled(true);
+                  setMicrophoneState("checking");
+                  setPermissionAttempt((attempt) => attempt + 1);
+                }
+              }}
+              type="button"
+            >
+              {microphoneEnabled && microphoneState === "ready" ? <Mic size={17} /> : <MicOff size={17} />}
+              Microphone {microphoneEnabled && microphoneState === "ready" ? "on" : "off"}
+            </button>
+            <button
+              aria-checked={cameraEnabled && cameraState === "ready"}
+              className="lobby-toggle"
+              role="switch"
+              onClick={() => {
+                if (cameraState === "ready") {
+                  setCameraEnabled((enabled) => !enabled);
+                } else {
+                  setCameraEnabled(true);
+                  setCameraState("checking");
+                  setPermissionAttempt((attempt) => attempt + 1);
+                }
+              }}
+              type="button"
+            >
+              {cameraEnabled && cameraState === "ready" ? <Camera size={17} /> : <CameraOff size={17} />}
+              Camera {cameraEnabled && cameraState === "ready" ? "on" : "off"}
+            </button>
+          </div>
+          {(cameraState === "missing" || microphoneState === "missing" ||
+            cameraPermissionDenied || microphonePermissionDenied) && (
+            <p className="lobby-friendly-message">
+              You can still join without a camera or microphone.
+            </p>
+          )}
+        </section>
+
+        <section className="lobby-settings">
+          <span className="lobby-open-label"><i /> Class is open</span>
+          <h1>Ready to join?</h1>
+          {spaceName && <p className="lobby-space-name">{spaceName}</p>}
+
+          <details className="lobby-devices" open>
+            <summary><span>Devices</span><ChevronDown aria-hidden="true" size={16} /></summary>
+            <label>
+              <Mic aria-hidden="true" size={17} />
+              <span>Microphone</span>
+              <select
+                aria-label="Choose microphone"
+                onChange={(event) => {
+                  setMicrophoneState("checking");
+                  setMicrophoneDeviceId(event.target.value);
+                }}
+                value={microphoneDeviceId}
+              >
+                <option value="">Default microphone</option>
+                {microphones.map((device, index) => (
+                  <option key={device.deviceId || index} value={device.deviceId}>
+                    {device.label || `Microphone ${index + 1}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <Camera aria-hidden="true" size={17} />
+              <span>Camera</span>
+              <select
+                aria-label="Choose camera"
+                onChange={(event) => {
+                  setCameraState("checking");
+                  setCameraDeviceId(event.target.value);
+                }}
+                value={cameraDeviceId}
+              >
+                <option value="">Default camera</option>
+                {cameras.map((device, index) => (
+                  <option key={device.deviceId || index} value={device.deviceId}>
+                    {device.label || `Camera ${index + 1}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <Volume2 aria-hidden="true" size={17} />
+              <span>Speaker</span>
+              <select aria-label="Choose speaker" onChange={(event) => setSpeakerDeviceId(event.target.value)} value={speakerDeviceId}>
+                <option value="">Default speaker</option>
+                {speakers.map((device, index) => (
+                  <option key={device.deviceId || index} value={device.deviceId}>
+                    {device.label || `Speaker ${index + 1}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </details>
+
+          <div className="lobby-actions">
+            <button className="lobby-link-button" disabled={speakerTestRunning} onClick={() => void testSpeakers()} type="button">
+              {speakerTestRunning ? "Playing sound..." : "Test speakers"}
+            </button>
+            {permissionNeeded && (
+              <button
+                className="lobby-link-button"
+                onClick={() => {
+                  setCameraEnabled(true);
+                  setMicrophoneEnabled(true);
+                  setPermissionAttempt((attempt) => attempt + 1);
+                }}
+                type="button"
+              >
+                Request microphone and camera permission
+              </button>
+            )}
+          </div>
+          {error && <p className="join-error" role="alert">{error}</p>}
+          <button className="primary-button lobby-join-button" disabled={busy || mediaChecking} onClick={joinClass} type="button">
+            <Video aria-hidden="true" size={17} /> Join class
+          </button>
+          {user && (
+            <p className="lobby-account">
+              Logged in as {user.name} ·{" "}
+              <button disabled={busy} onClick={() => void logOut()} type="button">
+                <LogOut aria-hidden="true" size={13} /> Log out
+              </button>
+            </p>
+          )}
+        </section>
+      </div>
+    </main>
   );
 }
 
@@ -1677,7 +2151,7 @@ export function App() {
       <Route path="/forgot-password" element={<ForgotPasswordPage />} />
       <Route path="/join" element={<JoinPage />} />
       <Route path="/room-test" element={<RoomTestPage />} />
-      <Route path="/lobby" element={<LobbyPlaceholder />} />
+      <Route path="/lobby" element={<LobbyPage />} />
       <Route path="/ended" element={<EndedPage />} />
       <Route
         element={

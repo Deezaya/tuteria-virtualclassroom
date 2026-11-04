@@ -1793,6 +1793,307 @@ a {
   gap: 8px;
 }
 
+.lobby-page {
+  min-height: 100vh;
+  background: #f3f6fc;
+}
+
+.lobby-header {
+  display: flex;
+  height: 78px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4.5%;
+  border-bottom: 1px solid #e1e7f0;
+  background: #fff;
+}
+
+.lobby-header .brand {
+  font-size: 21px;
+}
+
+.lobby-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  color: #23395e;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.lobby-back svg {
+  transform: rotate(180deg);
+}
+
+.lobby-layout {
+  display: grid;
+  width: min(1200px, calc(100% - 64px));
+  grid-template-columns: minmax(0, 1.45fr) minmax(360px, 1fr);
+  align-items: center;
+  gap: clamp(36px, 6vw, 82px);
+  margin: 0 auto;
+  padding: 31px 0 44px;
+}
+
+.lobby-preview-column {
+  min-width: 0;
+}
+
+.lobby-preview {
+  position: relative;
+  display: flex;
+  width: 100%;
+  aspect-ratio: 1.6;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 25px;
+  background: #adc5da;
+  box-shadow: var(--shadow-elevated);
+}
+
+.lobby-preview > video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);
+}
+
+.lobby-preview > strong {
+  position: absolute;
+  bottom: 20px;
+  left: 18px;
+  z-index: 1;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.lobby-network {
+  position: absolute;
+  right: 18px;
+  bottom: 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(20, 33, 61, 0.82);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.lobby-avatar {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: linear-gradient(180deg, #bed1e2 0%, #abc3d8 63%, #849cb3 100%);
+}
+
+.lobby-avatar span {
+  position: absolute;
+  top: 16%;
+  left: 50%;
+  width: 17%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: #8e5738;
+  box-shadow: 0 -12px 0 -1px #322016;
+  transform: translateX(-50%);
+}
+
+.lobby-avatar i {
+  position: absolute;
+  bottom: -27%;
+  left: 50%;
+  width: 45%;
+  height: 67%;
+  border-radius: 48% 48% 0 0;
+  background: #172f61;
+  transform: translateX(-50%);
+}
+
+.lobby-toggle-row {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.lobby-toggle {
+  display: inline-flex;
+  min-height: 43px;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 0 17px;
+  border: 1px solid #dce4ef;
+  border-radius: 999px;
+  background: #fff;
+  color: #14213d;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.lobby-friendly-message {
+  margin: 12px 0 0;
+  color: #647493;
+  font-size: 12px;
+  text-align: center;
+}
+
+.lobby-settings {
+  min-width: 0;
+}
+
+.lobby-open-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 11px;
+  border-radius: 999px;
+  background: #ddf7e9;
+  color: #176f50;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.lobby-open-label i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #168d5c;
+}
+
+.lobby-settings h1 {
+  margin: 18px 0 0;
+  color: var(--ink);
+  font-size: clamp(25px, 2.5vw, 34px);
+  font-weight: 700;
+  letter-spacing: -1.5px;
+}
+
+.lobby-space-name {
+  margin: 10px 0 22px;
+  color: #405777;
+  font-size: 13px;
+}
+
+.lobby-settings h1:not(:has(+ .lobby-space-name)) {
+  margin-bottom: 22px;
+}
+
+.lobby-devices {
+  overflow: hidden;
+  padding: 0 15px;
+  border: 1px solid #dce4ef;
+  border-radius: 18px;
+  background: #fff;
+}
+
+.lobby-devices summary {
+  display: flex;
+  min-height: 46px;
+  align-items: center;
+  justify-content: space-between;
+  color: #23395e;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.lobby-devices summary::-webkit-details-marker {
+  display: none;
+}
+
+.lobby-devices > label {
+  display: grid;
+  min-height: 63px;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-content: center;
+  align-items: center;
+  column-gap: 11px;
+  border-top: 1px solid #e9edf4;
+  color: #344a6c;
+}
+
+.lobby-devices > label > span {
+  color: #71819c;
+  font-size: 10px;
+}
+
+.lobby-devices > label select {
+  width: 100%;
+  grid-column: 2;
+  padding: 3px 20px 3px 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #14213d;
+  font-size: 12px;
+}
+
+.lobby-actions {
+  display: flex;
+  flex-wrap: wrap;
+  min-height: 52px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.lobby-link-button {
+  padding: 7px 0;
+  border: 0;
+  background: transparent;
+  color: var(--brand-blue);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.lobby-link-button:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.lobby-join-button {
+  width: 100%;
+  min-height: 46px;
+  gap: 9px;
+  margin-top: 8px;
+  border-radius: 999px;
+}
+
+.lobby-account {
+  margin: 12px 0 0;
+  color: #7787a0;
+  font-size: 10px;
+  text-align: center;
+}
+
+.lobby-account button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--brand-blue);
+  cursor: pointer;
+  font-size: inherit;
+  font-weight: 700;
+}
+
 .coming-soon {
   min-height: 300px;
   padding: 18px 0;
@@ -1858,6 +2159,12 @@ a {
   .session-tutor {
     display: none;
   }
+
+  .lobby-layout {
+    width: calc(100% - 48px);
+    grid-template-columns: minmax(0, 1.2fr) minmax(320px, 1fr);
+    gap: 34px;
+  }
 }
 
 @media (max-width: 760px) {
@@ -1911,6 +2218,50 @@ a {
 
   .signin-card h1 {
     font-size: 22px;
+  }
+
+  .lobby-header {
+    height: 65px;
+    padding: 0 18px;
+  }
+
+  .lobby-layout {
+    width: calc(100% - 36px);
+    grid-template-columns: minmax(0, 1fr);
+    gap: 26px;
+    padding: 22px 0 35px;
+  }
+
+  .lobby-preview {
+    aspect-ratio: 1.45;
+    border-radius: 20px;
+  }
+
+  .lobby-settings {
+    width: min(100%, 520px);
+    margin: 0 auto;
+  }
+
+  .lobby-settings h1 {
+    font-size: 26px;
+  }
+
+  .lobby-toggle {
+    min-height: 41px;
+    padding: 0 13px;
+    font-size: 11px;
+  }
+
+  .lobby-actions {
+    align-items: flex-start;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+    padding: 10px 0;
+  }
+
+  .lobby-link-button {
+    min-height: 30px;
   }
 
   .sessions-page {
