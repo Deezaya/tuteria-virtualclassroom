@@ -2137,6 +2137,117 @@ a {
   margin-left: 1px;
 }
 
+.classroom-invite-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.classroom-invite-trigger {
+  min-height: 40px;
+  padding: 0 17px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--brand-blue);
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.classroom-invite-popup {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 20;
+  width: min(360px, calc(100vw - 20px));
+  padding: 14px;
+  border: 1px solid #dfe5ef;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 12px 32px rgba(16, 33, 67, 0.18);
+  color: #14213d;
+}
+
+.classroom-invite-popup > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  font-size: 15px;
+}
+
+.classroom-invite-close {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #52627a;
+  cursor: pointer;
+}
+
+.classroom-invite-loading,
+.classroom-invite-error {
+  margin: 0;
+  color: #71819b;
+  font-size: 13px;
+}
+
+.classroom-invite-error {
+  margin-top: 10px;
+  color: #b52e35;
+}
+
+.classroom-invite-rows {
+  display: grid;
+  gap: 12px;
+}
+
+.classroom-invite-row {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.classroom-invite-row > label {
+  color: #405675;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.classroom-invite-row > div {
+  display: flex;
+  min-width: 0;
+  gap: 7px;
+}
+
+.classroom-invite-row input {
+  width: 0;
+  min-width: 0;
+  flex: 1;
+  padding: 0 9px;
+  border: 1px solid #dfe5ef;
+  border-radius: 8px;
+  background: #f8faff;
+  color: #52627a;
+  font-size: 12px;
+}
+
+.classroom-invite-row button {
+  min-width: 68px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: #0054e5;
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .classroom-leave-menu .room-leave-trigger {
   min-height: 40px;
   padding: 0 20px;
@@ -2172,14 +2283,95 @@ a {
   background-size: 20px 20px;
 }
 
-.whiteboard-placeholder {
+.classroom-whiteboard {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  overflow: hidden;
+}
+
+.classroom-whiteboard-content,
+.classroom-whiteboard-content .excalidraw {
+  width: 100%;
+  height: 100%;
+}
+
+.classroom-board-status {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  z-index: 3;
+  padding: 5px 9px;
+  border: 1px solid #dfe5ef;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #71819b;
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.classroom-board-status.status-connected {
+  color: #16835d;
+}
+
+.classroom-board-status.status-offline {
+  color: #b52e35;
+}
+
+.classroom-whiteboard-loading {
+  display: grid;
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  place-items: center;
+  background: #fbfcff;
+  color: #71819b;
+  font-size: 12px;
+}
+
+.classroom-board-error {
+  display: flex;
   position: absolute;
   top: 50%;
   left: 50%;
-  color: #71819b;
+  z-index: 4;
+  align-items: center;
+  flex-direction: column;
+  gap: 12px;
+  width: min(320px, calc(100% - 32px));
+  padding: 22px;
+  border: 1px solid #dfe5ef;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 12px 32px rgba(16, 33, 67, 0.12);
+  color: #14213d;
   font-size: 14px;
-  font-weight: 500;
+  text-align: center;
   transform: translate(-50%, -50%);
+}
+
+.classroom-board-error button {
+  min-height: 36px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--brand-blue);
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.classroom-whiteboard [aria-label*="Library" i],
+.classroom-whiteboard [title*="Library" i],
+.classroom-whiteboard [data-testid*="library" i],
+.classroom-whiteboard [aria-label*="Sign in" i],
+.classroom-whiteboard [title*="Sign in" i],
+.classroom-whiteboard [aria-label*="Collaborat" i],
+.classroom-whiteboard [title*="Collaborat" i],
+.classroom-whiteboard a[href*="plus.excalidraw.com"],
+.classroom-whiteboard a[href*="excalidraw.com/plus"] {
+  display: none !important;
 }
 
 .classroom-error,
@@ -2653,6 +2845,20 @@ a {
     min-height: 36px;
     padding: 0 11px;
     font-size: 11px;
+  }
+
+  .classroom-invite-trigger {
+    min-height: 36px;
+    padding: 0 10px;
+    font-size: 11px;
+  }
+
+  .classroom-invite-popup {
+    position: fixed;
+    top: 72px;
+    right: 10px;
+    left: 10px;
+    width: auto;
   }
 
   .classroom-workspace {

@@ -14,17 +14,20 @@
     "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
-    "@prisma/client": "^6.16.2",
     "@fastify/cookie": "^11.0.2",
     "@fastify/cors": "^11.0.1",
     "@fastify/jwt": "^9.1.0",
     "@fastify/rate-limit": "^10.3.0",
     "@fastify/swagger": "^9.5.1",
     "@fastify/swagger-ui": "^5.2.3",
+    "@hocuspocus/extension-database": "^4.8.0",
+    "@hocuspocus/server": "^4.8.0",
+    "@prisma/client": "^6.16.2",
+    "argon2": "^0.44.0",
     "dotenv": "^16.4.7",
     "fastify": "^5.6.1",
     "livekit-server-sdk": "^2.15.0",
-    "argon2": "^0.44.0",
+    "yjs": "^13.6.33",
     "zod": "^4.1.12"
   },
   "devDependencies": {

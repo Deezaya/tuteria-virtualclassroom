@@ -96,7 +96,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         return reply.code(401).send({ message: "invalid email or password" });
       }
 
-      const token = await reply.jwtSign({ sub: user.id }, { expiresIn: "8h" });
+      const token = await reply.jwtSign(
+        { sub: user.id, name: user.name, email: user.email, role: user.role },
+        { expiresIn: "8h" },
+      );
       return reply
         .setCookie("token", token, { ...cookieOptions, maxAge: 8 * 60 * 60 })
         .send({

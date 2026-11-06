@@ -100,16 +100,16 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const tokenHash = hashJoinToken(parsed.data.token);
-      const observerSpace = await prisma.space.findUnique({
-        where: { observerTokenHash: tokenHash },
-        select: { id: true, name: true },
-      });
-      const inviteSpace = observerSpace
-        ? null
-        : await prisma.space.findUnique({
+      const [observerSpace, inviteSpace] = await Promise.all([
+        prisma.space.findUnique({
+          where: { observerTokenHash: tokenHash },
+          select: { id: true, name: true },
+        }),
+        prisma.space.findUnique({
             where: { inviteTokenHash: tokenHash },
             select: { id: true, name: true },
-          });
+        }),
+      ]);
       const space = observerSpace ?? inviteSpace;
 
       if (!space) {
@@ -117,14 +117,15 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const observer = observerSpace !== null;
-      const user = observer ? null : await getOptionalUser(request);
-
       const now = new Date();
-      const latestSession = await prisma.session.findFirst({
-        where: { spaceId: space.id },
-        orderBy: { startedAt: "desc" },
-        select: { id: true, endedAt: true },
-      });
+      const [user, latestSession] = await Promise.all([
+        observer ? null : getOptionalUser(request),
+        prisma.session.findFirst({
+          where: { spaceId: space.id },
+          orderBy: { startedAt: "desc" },
+          select: { id: true, endedAt: true },
+        }),
+      ]);
       const currentParticipantId = getParticipantCookieId(request);
       if (!observer && currentParticipantId && latestSession) {
         const previouslyDenied = await prisma.participant.findFirst({
@@ -166,23 +167,24 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
               : "guest";
       const status = classRole === "guest" ? "waiting" : "admitted";
 
-      const participant = await prisma.participant.create({
-        data: {
-          sessionId: session.id,
-          userId: user?.id,
-          displayName: observer ? null : user?.name ?? parsed.data.name,
-          classRole,
-          status,
-          admittedAt: status === "admitted" ? now : null,
-          randomId: observer ? createObserverRandomId() : null,
-        },
-        select: { id: true, classRole: true, status: true },
-      });
-
-      await prisma.space.update({
-        where: { id: space.id },
-        data: { lastUsedAt: now },
-      });
+      const [participant] = await Promise.all([
+        prisma.participant.create({
+          data: {
+            sessionId: session.id,
+            userId: user?.id,
+            displayName: observer ? null : user?.name ?? parsed.data.name,
+            classRole,
+            status,
+            admittedAt: status === "admitted" ? now : null,
+            randomId: observer ? createObserverRandomId() : null,
+          },
+          select: { id: true, classRole: true, status: true },
+        }),
+        prisma.space.update({
+          where: { id: space.id },
+          data: { lastUsedAt: now },
+        }),
+      ]);
 
       return reply
         .code(201)

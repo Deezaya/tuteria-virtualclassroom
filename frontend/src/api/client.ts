@@ -125,6 +125,18 @@ export function createSpaceLink(
   );
 }
 
+export function getBoardToken(sessionId: string): Promise<{
+  token: string;
+  documentName: string;
+  expiresIn: number;
+}> {
+  return request<{
+    token: string;
+    documentName: string;
+    expiresIn: number;
+  }>(`/boards/${encodeURIComponent(sessionId)}/token`, { method: "POST" });
+}
+
 export type JoinStatus = "waiting" | "admitted" | "denied";
 export type ClassRole = "admin" | "tutor" | "student" | "guest" | "observer";
 

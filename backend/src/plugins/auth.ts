@@ -11,7 +11,7 @@ export type AuthenticatedUser = {
   id: string;
   name: string;
   email: string;
-  role: UserRole; 
+  role: UserRole;
 };
 
 declare module "fastify" {
@@ -22,9 +22,25 @@ declare module "fastify" {
 
 declare module "@fastify/jwt" {
   interface FastifyJWT {
-    payload: { sub: string };
-    user: { sub: string };
+    payload: {
+      sub: string;
+      name?: string;
+      email?: string;
+      role?: UserRole;
+      classRole?: string;
+      documentName?: string;
+    };
+    user: {
+      sub: string;
+      name?: string;
+      email?: string;
+      role?: UserRole;
+    };
   }
+}
+
+function isUserRole(role: unknown): role is UserRole {
+  return role === "admin" || role === "tutor" || role === "student";
 }
 
 export function registerAuthDecorators(app: FastifyInstance): void {
@@ -45,6 +61,20 @@ export async function authenticate(
   const userId = request.user.sub;
   if (!userId) {
     await reply.code(401).send({ message: "Unauthorized" });
+    return;
+  }
+
+  if (
+    isUserRole(request.user.role) &&
+    typeof request.user.name === "string" &&
+    typeof request.user.email === "string"
+  ) {
+    request.currentUser = {
+      id: userId,
+      name: request.user.name,
+      email: request.user.email,
+      role: request.user.role,
+    };
     return;
   }
 

@@ -69,6 +69,7 @@ model Session {
   participants Participant[]
 
   @@index([spaceId, endedAt])
+  @@index([spaceId, startedAt])
   @@map("sessions")
 }
 
@@ -87,6 +88,16 @@ model Participant {
   leftAt      DateTime?
 
   @@index([sessionId, status])
+  @@index([sessionId, status, joinedAt])
   @@index([userId])
   @@map("participants")
+}
+
+model Board {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String   @unique
+  data      Bytes?
+  updatedAt DateTime @updatedAt
+
+  @@map("boards")
 }

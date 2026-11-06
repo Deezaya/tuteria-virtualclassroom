@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import { prisma } from "../../db.js";
-import { getOptionalUser, getParticipantCookieId } from "../join/service.js";
+import { getParticipantCookieId } from "../join/service.js";
 import { config } from "../../config.js";
 import { createParticipantToken } from "./service.js";
 
@@ -27,12 +27,18 @@ async function findCurrentParticipant(request: FastifyRequest) {
     });
   }
 
-  const user = await getOptionalUser(request);
-  if (!user) return null;
+  if (!request.cookies.token) return null;
+  try {
+    await request.jwtVerify();
+  } catch {
+    return null;
+  }
+  const userId = request.user.sub;
+  if (!userId) return null;
 
   return prisma.participant.findFirst({
     where: {
-      userId: user.id,
+      userId,
       session: { endedAt: null },
     },
     orderBy: { joinedAt: "desc" },

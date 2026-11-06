@@ -190,17 +190,44 @@ async function deleteLiveKitRoomIfPresent(roomName: string): Promise<void> {
 }
 
 export async function listWaitingGuests(sessionId: string) {
-  const session = await prisma.session.findUnique({
-    where: { id: sessionId },
-    select: { id: true },
-  });
-  if (!session) return null;
+  type WaitingGuestRow = {
+    id: string;
+    sessionId: string;
+    displayName: string | null;
+    classRole: "guest";
+    status: "waiting";
+    joinedAt: Date | string;
+  };
+  type SessionWaitingRow = { participants: WaitingGuestRow[] };
 
-  return prisma.participant.findMany({
-    where: { sessionId, ...waitingGuestWhere },
-    orderBy: { joinedAt: "asc" },
-    select: participantSelect,
-  });
+  const [result] = await prisma.$queryRaw<SessionWaitingRow[]>`
+    SELECT COALESCE(
+      jsonb_agg(
+        jsonb_build_object(
+          'id', p."id",
+          'sessionId', p."sessionId",
+          'displayName', p."displayName",
+          'classRole', p."classRole",
+          'status', p."status",
+          'joinedAt', p."joinedAt"
+        ) ORDER BY p."joinedAt" ASC
+      ) FILTER (WHERE p."id" IS NOT NULL),
+      '[]'::jsonb
+    ) AS participants
+    FROM "sessions" s
+    LEFT JOIN "participants" p
+      ON p."sessionId" = s."id"
+      AND p."classRole" = 'guest'
+      AND p."status" = 'waiting'
+    WHERE s."id" = ${sessionId}::uuid
+    GROUP BY s."id"
+  `;
+  if (!result) return null;
+
+  return result.participants.map((participant) => ({
+    ...participant,
+    joinedAt: new Date(participant.joinedAt),
+  }));
 }
 
 export async function updateWaitingGuestStatus(

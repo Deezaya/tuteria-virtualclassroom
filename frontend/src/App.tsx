@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import {
   LiveKitRoom,
   ParticipantTile,
@@ -87,6 +95,8 @@ import {
   updateWaitingParticipant,
 } from "./api/client";
 import { useAuth } from "./auth/AuthProvider";
+
+const Whiteboard = lazy(() => import("./Whiteboard"));
 
 type RoomMediaPreferences = {
   cameraEnabled: boolean;
@@ -1209,6 +1219,7 @@ function RoomTestPage() {
     token: string;
     url: string;
     sessionId: string;
+    spaceId: string;
     classRole: ClassRole;
     spaceName: string;
   } | null>(null);
@@ -1259,6 +1270,7 @@ function RoomTestPage() {
       setCredentials({
         ...tokenResult.value,
         sessionId: statusResult.value.sessionId,
+        spaceId: statusResult.value.spaceId,
         classRole: statusResult.value.classRole,
         spaceName: statusResult.value.spaceName,
       });
@@ -1322,6 +1334,7 @@ function RoomTestPage() {
           onEnded={() => navigate("/ended", { replace: true, state: { joinPath } })}
           speakerDeviceId={mediaPreferences.speakerDeviceId}
           sessionId={credentials.sessionId}
+          spaceId={credentials.spaceId}
         />
       </LiveKitRoom>
     </main>
@@ -1330,6 +1343,7 @@ function RoomTestPage() {
 
 function RoomTestControls({
   sessionId,
+  spaceId,
   onLeft,
   onEnded,
   onError,
@@ -1339,6 +1353,7 @@ function RoomTestControls({
   roomName,
 }: {
   sessionId: string;
+  spaceId: string;
   onLeft: () => void;
   onEnded: () => void;
   onError: (message: string) => void;
@@ -1372,6 +1387,13 @@ function RoomTestControls({
   const [busyGuestId, setBusyGuestId] = useState<string | null>(null);
   const [waitingError, setWaitingError] = useState("");
   const menuRef = useRef<HTMLDivElement>(null);
+  const inviteMenuRef = useRef<HTMLDivElement>(null);
+  const copiedTimerRef = useRef<number | null>(null);
+  const [inviteMenuOpen, setInviteMenuOpen] = useState(false);
+  const [inviteLink, setInviteLink] = useState<string | null>(null);
+  const [inviteLoading, setInviteLoading] = useState(false);
+  const [inviteError, setInviteError] = useState("");
+  const [inviteCopied, setInviteCopied] = useState(false);
   const isHostClassRole = classRole === "admin" || classRole === "tutor";
   const canPublish = classRole !== "observer";
   const visibleParticipants = participants.filter((participant) =>
@@ -1391,6 +1413,30 @@ function RoomTestControls({
     document.addEventListener("pointerdown", closeOnOutside);
     return () => document.removeEventListener("pointerdown", closeOnOutside);
   }, [menuOpen]);
+
+  useEffect(() => {
+    if (!inviteMenuOpen) return;
+    function closeInviteOnOutside(event: PointerEvent) {
+      if (!inviteMenuRef.current?.contains(event.target as Node)) {
+        setInviteMenuOpen(false);
+      }
+    }
+    function closeInviteOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setInviteMenuOpen(false);
+    }
+    document.addEventListener("pointerdown", closeInviteOnOutside);
+    document.addEventListener("keydown", closeInviteOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeInviteOnOutside);
+      document.removeEventListener("keydown", closeInviteOnEscape);
+    };
+  }, [inviteMenuOpen]);
+
+  useEffect(() => () => {
+    if (copiedTimerRef.current !== null) {
+      window.clearTimeout(copiedTimerRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     if (!isHostClassRole) {
@@ -1469,6 +1515,63 @@ function RoomTestControls({
     }
   }
 
+  async function openInviteMenu() {
+    const opening = !inviteMenuOpen;
+    setInviteMenuOpen(opening);
+    if (!opening) return;
+
+    setInviteLink(null);
+    setInviteError("");
+    setInviteLoading(true);
+    try {
+      const guestResult = await createSpaceLink(spaceId, "invite");
+      const frontendLink = (link: string) => {
+        const parsed = new URL(link, window.location.origin);
+        return `${window.location.origin}${parsed.pathname}${parsed.search}`;
+      };
+      setInviteLink(frontendLink(guestResult.link));
+    } catch (cause) {
+      setInviteError(
+        cause instanceof Error ? cause.message : "Unable to load invite links. Please try again.",
+      );
+    } finally {
+      setInviteLoading(false);
+    }
+  }
+
+  async function copyInviteLink() {
+    const link = inviteLink;
+    if (!link) return;
+
+    try {
+      try {
+        await navigator.clipboard.writeText(link);
+      } catch {
+        const input = document.createElement("textarea");
+        input.value = link;
+        input.setAttribute("readonly", "");
+        input.style.position = "fixed";
+        input.style.opacity = "0";
+        document.body.appendChild(input);
+        let copied = false;
+        try {
+          input.select();
+          copied = document.execCommand("copy");
+        } finally {
+          document.body.removeChild(input);
+        }
+        if (!copied) throw new Error("Copying is blocked by this browser.");
+      }
+      setInviteCopied(true);
+      if (copiedTimerRef.current !== null) {
+        window.clearTimeout(copiedTimerRef.current);
+      }
+      copiedTimerRef.current = window.setTimeout(() => setInviteCopied(false), 2000);
+    } catch (cause) {
+      setInviteError(cause instanceof Error ? cause.message : "Unable to copy the link.");
+    }
+  }
+
   async function respondToGuest(guest: WaitingParticipant, action: "admit" | "deny") {
     setBusyGuestId(guest.id);
     setWaitingError("");
@@ -1534,6 +1637,54 @@ function RoomTestControls({
         <button className="classroom-topbar-icon" disabled title="Coming soon" type="button">
           <Clock3 aria-hidden="true" size={17} />
         </button>
+        {isHostClassRole && (
+          <div className="classroom-invite-menu" ref={inviteMenuRef}>
+            <button
+              aria-expanded={inviteMenuOpen}
+              aria-haspopup="dialog"
+              className="classroom-invite-trigger"
+              onClick={() => void openInviteMenu()}
+              type="button"
+            >
+              Invite others
+            </button>
+            {inviteMenuOpen && (
+              <section aria-label="Invite others" className="classroom-invite-popup" role="dialog">
+                <header>
+                  <strong>Invite others</strong>
+                  <button
+                    aria-label="Close invite links"
+                    className="classroom-invite-close"
+                    onClick={() => setInviteMenuOpen(false)}
+                    type="button"
+                  >
+                    <X aria-hidden="true" size={16} />
+                  </button>
+                </header>
+                {inviteLoading ? (
+                  <p className="classroom-invite-loading">Loading link…</p>
+                ) : inviteLink ? (
+                  <div className="classroom-invite-rows">
+                    <div className="classroom-invite-row">
+                      <label htmlFor="classroom-guest-link">Guest link</label>
+                      <div>
+                        <input
+                          id="classroom-guest-link"
+                          readOnly
+                          value={inviteLink}
+                        />
+                        <button onClick={() => void copyInviteLink()} type="button">
+                          {inviteCopied ? "Copied ✓" : "Copy"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+                {inviteError && <p className="classroom-invite-error" role="alert">{inviteError}</p>}
+              </section>
+            )}
+          </div>
+        )}
         <div className="room-leave-menu classroom-leave-menu" ref={menuRef}>
           <button
             aria-expanded={menuOpen}
@@ -1568,7 +1719,15 @@ function RoomTestControls({
 
       <div className={`classroom-workspace layout-${layout}${isHostClassRole ? " has-layout-controls" : ""}`}>
         <main className="classroom-board">
-          <div className="whiteboard-placeholder">Whiteboard coming next</div>
+          <div className="classroom-whiteboard">
+            <Suspense fallback={<div className="classroom-whiteboard-loading">Loading board…</div>}>
+              <Whiteboard
+                classRole={classRole}
+                displayName={localParticipant.name || localParticipant.identity}
+                sessionId={sessionId}
+              />
+            </Suspense>
+          </div>
           {error && !confirmEnding && <p className="classroom-error" role="alert">{error}</p>}
           {isHostClassRole && waitingError && (
             <p className="classroom-waiting-error" role="alert">{waitingError}</p>

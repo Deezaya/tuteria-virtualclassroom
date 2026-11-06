@@ -9,18 +9,21 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@excalidraw/excalidraw": "^0.18.1",
+    "@hocuspocus/provider": "^4.8.0",
     "@livekit/components-react": "^2.9.14",
     "@livekit/components-styles": "^1.0.12",
-    "lucide-react": "^0.468.0",
     "livekit-client": "^2.15.6",
+    "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "react-router-dom": "^7.6.2"
+    "react-router-dom": "^7.6.2",
+    "yjs": "^13.6.33"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^4.4.1",
     "@types/react": "^19.0.12",
     "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^4.4.1",
     "typescript": "^5.8.3",
     "vite": "^6.3.5"
   }
