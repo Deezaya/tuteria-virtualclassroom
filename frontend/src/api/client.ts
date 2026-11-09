@@ -137,8 +137,65 @@ export function getBoardToken(sessionId: string): Promise<{
   }>(`/boards/${encodeURIComponent(sessionId)}/token`, { method: "POST" });
 }
 
-export type JoinStatus = "waiting" | "admitted" | "denied";
+export type JoinStatus = "waiting" | "admitted" | "denied" | "removed";
 export type ClassRole = "admin" | "tutor" | "student" | "guest" | "observer";
+export type ClassPermissions = {
+  editing: boolean;
+  microphone: boolean;
+  camera: boolean;
+  screenShare: boolean;
+  raiseHand: boolean;
+  reactions: boolean;
+  chat: boolean;
+  fileUploads: boolean;
+};
+export type PermissionKey = keyof ClassPermissions;
+export type SessionParticipant = {
+  id: string;
+  name: string;
+  role: Exclude<ClassRole, "observer">;
+  permissions: ClassPermissions;
+};
+
+export function getSessionParticipants(
+  sessionId: string,
+): Promise<{ participants: SessionParticipant[]; defaultPermissions: ClassPermissions }> {
+  return request<{ participants: SessionParticipant[]; defaultPermissions: ClassPermissions }>(
+    `/sessions/${encodeURIComponent(sessionId)}/participants`,
+  );
+}
+
+export function updateParticipantPermissions(
+  sessionId: string,
+  participantId: string,
+  permissions: Partial<ClassPermissions>,
+): Promise<{ participantId: string; permissions: ClassPermissions }> {
+  return request<{ participantId: string; permissions: ClassPermissions }>(
+    `/sessions/${encodeURIComponent(sessionId)}/participants/${encodeURIComponent(participantId)}/permissions`,
+    { method: "PATCH", body: JSON.stringify(permissions) },
+  );
+}
+
+export function updateEveryonePermissions(
+  sessionId: string,
+  permissions: Partial<ClassPermissions>,
+): Promise<{ permissions: ClassPermissions }> {
+  return request<{ permissions: ClassPermissions }>(
+    `/sessions/${encodeURIComponent(sessionId)}/permissions`,
+    { method: "PATCH", body: JSON.stringify(permissions) },
+  );
+}
+
+export function manageParticipant(
+  sessionId: string,
+  participantId: string,
+  action: "mute" | "camera-off" | "remove",
+): Promise<{ message: string }> {
+  return request<{ message: string }>(
+    `/sessions/${encodeURIComponent(sessionId)}/participants/${encodeURIComponent(participantId)}/${action}`,
+    { method: "POST" },
+  );
+}
 
 export type WaitingParticipant = {
   id: string;
@@ -148,6 +205,37 @@ export type WaitingParticipant = {
   status: "waiting" | "admitted" | "denied";
   joinedAt: string;
 };
+
+export type ChatMessage = {
+  id: string;
+  senderName: string | null;
+  senderRole: ClassRole;
+  participantId: string;
+  body: string;
+  createdAt: string;
+};
+
+export function getChatMessages(
+  sessionId: string,
+  before?: string,
+): Promise<{ messages: ChatMessage[] }> {
+  const query = new URLSearchParams();
+  if (before) query.set("before", before);
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return request<{ messages: ChatMessage[] }>(
+    `/sessions/${encodeURIComponent(sessionId)}/chat${suffix}`,
+  );
+}
+
+export function sendChatMessage(
+  sessionId: string,
+  body: string,
+): Promise<ChatMessage> {
+  return request<ChatMessage>(
+    `/sessions/${encodeURIComponent(sessionId)}/chat`,
+    { method: "POST", body: JSON.stringify({ body }) },
+  );
+}
 
 export type SessionRecord = {
   id: string;
@@ -241,6 +329,10 @@ export function getJoinStatus(): Promise<{
   );
 }
 
+export function getJoinEventsUrl(): string {
+  return `${apiUrl}/join/events`;
+}
+
 export function getWaitingParticipants(
   sessionId: string,
 ): Promise<{ participants: WaitingParticipant[] }> {
@@ -273,8 +365,12 @@ export function endSession(sessionId: string): Promise<{ message: string }> {
   );
 }
 
-export function getLiveKitToken(): Promise<{ token: string; url: string }> {
-  return request<{ token: string; url: string }>("/livekit/token", {
+export function getLiveKitToken(): Promise<{
+  token: string;
+  url: string;
+  permissions: ClassPermissions;
+}> {
+  return request<{ token: string; url: string; permissions: ClassPermissions }>("/livekit/token", {
     method: "POST",
   });
 }

@@ -3,6 +3,7 @@ import { prisma } from "../../db.js";
 import { getParticipantCookieId } from "../join/service.js";
 import { config } from "../../config.js";
 import { createParticipantToken } from "./service.js";
+import { readPermissions } from "../sessions/permissions.js";
 
 const errorResponse = {
   type: "object",
@@ -20,6 +21,7 @@ async function findCurrentParticipant(request: FastifyRequest) {
         displayName: true,
         classRole: true,
         status: true,
+        permissions: true,
         session: {
           select: { id: true, endedAt: true, spaceId: true },
         },
@@ -47,6 +49,7 @@ async function findCurrentParticipant(request: FastifyRequest) {
       displayName: true,
       classRole: true,
       status: true,
+      permissions: true,
       session: {
         select: { id: true, endedAt: true, spaceId: true },
       },
@@ -70,8 +73,12 @@ export const livekitRoutes: FastifyPluginAsync = async (app) => {
             properties: {
               token: { type: "string" },
               url: { type: "string", format: "uri" },
+              permissions: {
+                type: "object",
+                additionalProperties: { type: "boolean" },
+              },
             },
-            required: ["token", "url"],
+            required: ["token", "url", "permissions"],
           },
           401: errorResponse,
           403: errorResponse,
@@ -90,7 +97,11 @@ export const livekitRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const token = await createParticipantToken(participant);
-      return reply.send({ token, url: config.LIVEKIT_URL });
+      return reply.send({
+        token,
+        url: config.LIVEKIT_URL,
+        permissions: readPermissions(participant.permissions),
+      });
     },
   );
 };

@@ -32,10 +32,12 @@ import {
   MessageCircle,
   MonitorUp,
   MoreVertical,
+  Paperclip,
   Plus,
   PanelRight,
   PictureInPicture2,
   Search,
+  Send,
   ChevronRight,
   Settings,
   Smile,
@@ -56,6 +58,7 @@ import {
   VideoPresets,
   type Participant as LiveKitParticipant,
   type RoomOptions,
+  RoomEvent,
 } from "livekit-client";
 import {
   Link,
@@ -74,8 +77,11 @@ import {
   deleteSpace,
   endSession,
   getCurrentUser,
+  getChatMessages,
   getLiveKitToken,
+  getSessionParticipants,
   getJoinStatus,
+  getJoinEventsUrl,
   getSessionAttendance,
   getSessions,
   getSpaces,
@@ -83,6 +89,8 @@ import {
   leaveSession,
   resolveInvite,
   renameSpace,
+  sendChatMessage,
+  type ChatMessage,
   type Space,
   type SpaceScope,
   type SpaceSort,
@@ -93,6 +101,12 @@ import {
   type WaitingParticipant,
   getWaitingParticipants,
   updateWaitingParticipant,
+  manageParticipant,
+  updateEveryonePermissions,
+  updateParticipantPermissions,
+  type ClassPermissions,
+  type PermissionKey,
+  type SessionParticipant,
 } from "./api/client";
 import { useAuth } from "./auth/AuthProvider";
 
@@ -1182,6 +1196,110 @@ function formatClassRole(role: ClassRole | null): string {
   return "Participant";
 }
 
+type ChatEntry = {
+  message: ChatMessage;
+  delivery: "sent" | "sending" | "failed";
+  localKey?: string;
+};
+
+const allClassPermissions: ClassPermissions = {
+  editing: true,
+  microphone: true,
+  camera: true,
+  screenShare: true,
+  raiseHand: true,
+  reactions: true,
+  chat: true,
+  fileUploads: true,
+};
+const permissionLabels: Record<PermissionKey, string> = {
+  editing: "Editing",
+  microphone: "Microphone",
+  camera: "Camera",
+  screenShare: "Screen share",
+  raiseHand: "Raise hand",
+  reactions: "Reactions",
+  chat: "Chat",
+  fileUploads: "File uploads",
+};
+const permissionKeys: PermissionKey[] = [
+  "editing",
+  "microphone",
+  "camera",
+  "screenShare",
+  "raiseHand",
+  "reactions",
+  "chat",
+  "fileUploads",
+];
+const maxRenderedChatMessages = 200;
+
+function isChatMessage(value: unknown): value is ChatMessage {
+  if (typeof value !== "object" || value === null) return false;
+  const message = value as Record<string, unknown>;
+  return (
+    typeof message.id === "string" &&
+    (typeof message.senderName === "string" || message.senderName === null) &&
+    ["admin", "tutor", "student", "guest", "observer"].includes(
+      String(message.senderRole),
+    ) &&
+    typeof message.participantId === "string" &&
+    typeof message.body === "string" &&
+    typeof message.createdAt === "string" &&
+    !Number.isNaN(Date.parse(message.createdAt))
+  );
+}
+
+function readPermissionChanges(value: unknown): Partial<ClassPermissions> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const permissions: Partial<ClassPermissions> = {};
+  for (const key of Object.keys(allClassPermissions) as PermissionKey[]) {
+    const setting = (value as Record<string, unknown>)[key];
+    if (typeof setting === "boolean") permissions[key] = setting;
+  }
+  return Object.keys(permissions).length > 0 ? permissions : null;
+}
+
+function mergeChatEntries(
+  current: ChatEntry[],
+  incoming: ChatMessage[],
+  localParticipantId: string,
+): ChatEntry[] {
+  const entries = [...current];
+  for (const message of incoming) {
+    const existingIndex = entries.findIndex(
+      (entry) => entry.message.id === message.id,
+    );
+    if (existingIndex >= 0) {
+      entries[existingIndex] = { message, delivery: "sent" };
+      continue;
+    }
+
+    const pendingIndex =
+      message.participantId === localParticipantId
+        ? entries.findIndex(
+            (entry) =>
+              entry.delivery !== "sent" &&
+              entry.message.participantId === localParticipantId &&
+              entry.message.body === message.body,
+          )
+        : -1;
+    if (pendingIndex >= 0) {
+      entries[pendingIndex] = {
+        message,
+        delivery: "sent",
+      };
+    } else {
+      entries.push({ message, delivery: "sent" });
+    }
+  }
+  entries.sort(
+    (left, right) =>
+      Date.parse(left.message.createdAt) - Date.parse(right.message.createdAt),
+  );
+  return entries.slice(-maxRenderedChatMessages);
+}
+
 function getInitials(name: string): string {
   return name
     .trim()
@@ -1222,9 +1340,11 @@ function RoomTestPage() {
     spaceId: string;
     classRole: ClassRole;
     spaceName: string;
+    permissions: ClassPermissions;
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [removed, setRemoved] = useState(false);
   const [roomError, setRoomError] = useState("");
   const [attempt, setAttempt] = useState(0);
 
@@ -1232,6 +1352,7 @@ function RoomTestPage() {
     let active = true;
     setLoading(true);
     setError("");
+    setRemoved(false);
     setRoomError("");
     setCredentials(null);
 
@@ -1247,7 +1368,9 @@ function RoomTestPage() {
         if (cause instanceof ApiError && cause.status === 401) {
           setError("You need to join a class first.");
         } else if (cause instanceof ApiError && cause.status === 403) {
-          if (statusResult.status === "fulfilled" && statusResult.value.status === "waiting") {
+          if (statusResult.status === "fulfilled" && statusResult.value.status === "removed") {
+            setRemoved(true);
+          } else if (statusResult.status === "fulfilled" && statusResult.value.status === "waiting") {
             setError("Waiting to be admitted.");
           } else if (statusResult.status === "fulfilled" && statusResult.value.status === "denied") {
             setError("The tutor didn’t let you in.");
@@ -1287,6 +1410,18 @@ function RoomTestPage() {
     return <main className="room-test-page">Connecting to LiveKit...</main>;
   }
 
+  if (removed) {
+    return (
+      <main className="class-exit-page">
+        <section className="join-card" role="status">
+          <div className="join-icon"><X aria-hidden="true" size={25} /></div>
+          <h1>You were removed from this class</h1>
+          <Link className="class-ended-rejoin" to={joinPath ?? "/spaces"}>Back</Link>
+        </section>
+      </main>
+    );
+  }
+
   if (error) {
     return (
       <main className="room-test-page">
@@ -1310,6 +1445,8 @@ function RoomTestPage() {
         onDisconnected={(reason) => {
           if (reason === DisconnectReason.ROOM_DELETED) {
             navigate("/ended", { replace: true, state: { joinPath } });
+          } else if (String(reason).toLowerCase() === "participant_removed") {
+            setRemoved(true);
           }
         }}
         options={roomTestOptions}
@@ -1327,6 +1464,7 @@ function RoomTestPage() {
           error={roomError}
           onError={setRoomError}
           classRole={credentials.classRole}
+          initialPermissions={credentials.permissions}
           roomName={credentials.spaceName}
           onLeft={() => {
             navigate("/left", { replace: true, state: { joinPath } });
@@ -1351,6 +1489,7 @@ function RoomTestControls({
   speakerDeviceId,
   classRole,
   roomName,
+  initialPermissions,
 }: {
   sessionId: string;
   spaceId: string;
@@ -1361,6 +1500,7 @@ function RoomTestControls({
   speakerDeviceId: string;
   classRole: ClassRole;
   roomName: string;
+  initialPermissions: ClassPermissions;
 }) {
   const connectionState = useConnectionState();
   const cameraTracks = useTracks(
@@ -1382,6 +1522,20 @@ function RoomTestControls({
   const [screenSharePending, setScreenSharePending] = useState(false);
   const [layout, setLayout] = useState<"grid" | "sidebar" | "floating">("grid");
   const [peopleOpen, setPeopleOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatUnread, setChatUnread] = useState(0);
+  const [chatMessages, setChatMessages] = useState<ChatEntry[]>([]);
+  const [chatDraft, setChatDraft] = useState("");
+  const [chatHistoryLoading, setChatHistoryLoading] = useState(true);
+  const [chatHistoryError, setChatHistoryError] = useState("");
+  const [chatHistoryAttempt, setChatHistoryAttempt] = useState(0);
+  const [chatSending, setChatSending] = useState(false);
+  const chatSessionIdRef = useRef(sessionId);
+  const chatOpenRef = useRef(false);
+  const localParticipantIdRef = useRef(localParticipant.identity);
+  const chatListRef = useRef<HTMLDivElement>(null);
+  const chatAtBottomRef = useRef(true);
+  const nextChatLocalKeyRef = useRef(0);
   const [waitingGuests, setWaitingGuests] = useState<WaitingParticipant[]>([]);
   const [dismissedGuestIds, setDismissedGuestIds] = useState<Set<string>>(() => new Set());
   const [busyGuestId, setBusyGuestId] = useState<string | null>(null);
@@ -1394,8 +1548,40 @@ function RoomTestControls({
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteError, setInviteError] = useState("");
   const [inviteCopied, setInviteCopied] = useState(false);
+  const [hostControlsOpen, setHostControlsOpen] = useState(false);
+  const [hostParticipants, setHostParticipants] = useState<SessionParticipant[]>([]);
+  const [defaultPermissions, setDefaultPermissions] = useState<ClassPermissions>(allClassPermissions);
+  const [hostControlsError, setHostControlsError] = useState("");
+  const [hostControlsLoading, setHostControlsLoading] = useState(true);
+  const [participantsLoadError, setParticipantsLoadError] = useState("");
+  const participantsLoadedRef = useRef(false);
+  const refreshHostParticipantsRef = useRef<() => void>(() => undefined);
+  const [peopleError, setPeopleError] = useState("");
+  const [personMenuId, setPersonMenuId] = useState<string | null>(null);
+  const [busyParticipantId, setBusyParticipantId] = useState<string | null>(null);
+  const [pendingHostOperations, setPendingHostOperations] = useState<Set<string>>(() => new Set());
+  const pendingHostOperationsRef = useRef(new Set<string>());
+  const [optimisticParticipantActions, setOptimisticParticipantActions] = useState<
+    Record<string, { microphoneMuted?: boolean; cameraOff?: boolean }>
+  >({});
+  const [removeTarget, setRemoveTarget] = useState<SessionParticipant | null>(null);
+  const [observerLink, setObserverLink] = useState<string | null>(null);
+  const [observerLinkCopied, setObserverLinkCopied] = useState(false);
+  const [observerLinkLoading, setObserverLinkLoading] = useState(false);
+  const [observerLinkError, setObserverLinkError] = useState("");
+  const [myPermissions, setMyPermissions] = useState<ClassPermissions>(initialPermissions);
+  const [permissionNotice, setPermissionNotice] = useState("");
+  const observerCopiedTimerRef = useRef<number | null>(null);
+  const permissionNoticeTimerRef = useRef<number | null>(null);
+  const hostControlsRef = useRef<HTMLDivElement>(null);
+  const personMenuRef = useRef<HTMLDivElement>(null);
   const isHostClassRole = classRole === "admin" || classRole === "tutor";
   const canPublish = classRole !== "observer";
+  const canEditBoard = classRole !== "observer" && myPermissions.editing;
+  const canUseMicrophone = canPublish && myPermissions.microphone;
+  const canUseCamera = canPublish && myPermissions.camera;
+  const canUseScreenShare = canPublish && myPermissions.screenShare;
+  const participantSignature = participants.map((participant) => participant.identity).sort().join("|");
   const visibleParticipants = participants.filter((participant) =>
     readParticipantRole(participant) !== "observer" &&
     !(participant.identity === localParticipant.identity && classRole === "observer"),
@@ -1404,6 +1590,203 @@ function RoomTestControls({
     (guest) => !dismissedGuestIds.has(guest.id),
   );
   const currentGuest = visibleWaitingGuests[0];
+  chatOpenRef.current = chatOpen;
+  localParticipantIdRef.current = localParticipant.identity;
+
+  useEffect(() => {
+    let active = true;
+    if (chatSessionIdRef.current !== sessionId) {
+      chatSessionIdRef.current = sessionId;
+      setChatMessages([]);
+    }
+    setChatHistoryLoading(true);
+    setChatHistoryError("");
+
+    getChatMessages(sessionId)
+      .then(({ messages }) => {
+        if (!active) return;
+        setChatMessages((current) =>
+          mergeChatEntries(current, messages, localParticipantIdRef.current),
+        );
+        setChatHistoryLoading(false);
+      })
+      .catch(() => {
+        if (!active) return;
+        setChatHistoryError("Could not load chat messages.");
+        setChatHistoryLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [chatHistoryAttempt, sessionId]);
+
+  useEffect(() => {
+    const handleData = (
+      payload: Uint8Array,
+      _participant: LiveKitParticipant | undefined,
+      _kind: unknown,
+      topic?: string,
+    ) => {
+      if (topic === "waiting") {
+        if (!isHostClassRole) return;
+        void getWaitingParticipants(sessionId)
+          .then(({ participants: updatedGuests }) => {
+            setWaitingGuests(updatedGuests);
+            setWaitingError("");
+          })
+          .catch(() => {
+            setWaitingError("We couldn’t check guest requests. Please try again.");
+          });
+        return;
+      }
+      if (topic !== "chat" && topic !== "permissions" && topic !== "classroom-control") return;
+      try {
+        const parsed: unknown = JSON.parse(new TextDecoder().decode(payload));
+        if (topic === "classroom-control") {
+          if (
+            typeof parsed === "object" &&
+            parsed !== null &&
+            "type" in parsed &&
+            parsed.type === "microphone-muted"
+          ) {
+            setPermissionNotice("Your tutor muted your microphone.");
+            if (permissionNoticeTimerRef.current !== null) {
+              window.clearTimeout(permissionNoticeTimerRef.current);
+            }
+            permissionNoticeTimerRef.current = window.setTimeout(
+              () => setPermissionNotice(""),
+              3500,
+            );
+          }
+          return;
+        }
+        if (topic === "permissions") {
+          if (typeof parsed !== "object" || parsed === null) return;
+          const message = parsed as Record<string, unknown>;
+          const changes = readPermissionChanges(message.permissions);
+          if (!changes) return;
+          if (
+            message.scope === "everyone" ||
+            message.participantId === localParticipantIdRef.current
+          ) {
+            setMyPermissions((current) => {
+              const next = { ...current, ...changes };
+              for (const key of permissionKeys) {
+                if (
+                  pendingHostOperationsRef.current.has(`everyone:${key}`) ||
+                  pendingHostOperationsRef.current.has(
+                    `person:${localParticipantIdRef.current}:${key}`,
+                  )
+                ) {
+                  next[key] = current[key];
+                }
+              }
+              return next;
+            });
+          }
+          setHostParticipants((current) =>
+            current.map((participant) => {
+              if (message.scope !== "everyone" && message.participantId !== participant.id) {
+                return participant;
+              }
+              const permissions = { ...participant.permissions, ...changes };
+              for (const key of permissionKeys) {
+                if (
+                  pendingHostOperationsRef.current.has(`everyone:${key}`) ||
+                  pendingHostOperationsRef.current.has(`person:${participant.id}:${key}`)
+                ) {
+                  permissions[key] = participant.permissions[key];
+                }
+              }
+              return { ...participant, permissions };
+            }),
+          );
+          return;
+        }
+        if (!isChatMessage(parsed)) return;
+        setChatMessages((current) =>
+          mergeChatEntries(current, [parsed], localParticipantIdRef.current),
+        );
+        if (
+          parsed.participantId !== localParticipantIdRef.current &&
+          !chatOpenRef.current
+        ) {
+          setChatUnread((count) => count + 1);
+        }
+      } catch {
+        return;
+      }
+    };
+
+    room.on(RoomEvent.DataReceived, handleData);
+    return () => {
+      room.off(RoomEvent.DataReceived, handleData);
+    };
+  }, [isHostClassRole, room, sessionId]);
+
+  useEffect(() => {
+    const handlePermissionsChanged = (
+      _previousPermissions: unknown,
+      participant: LiveKitParticipant,
+    ) => {
+      if (participant.identity !== localParticipant.identity || !participant.permissions) return;
+      const { canPublish, canPublishSources, canPublishData } = participant.permissions;
+      const allowsSource = (numericSource: number, sourceName: string) =>
+        canPublishSources.length === 0 ||
+        canPublishSources.some(
+          (source) =>
+            source === numericSource ||
+            String(source).toLowerCase() === sourceName,
+        );
+      setMyPermissions((current) => ({
+        ...current,
+        microphone: canPublish && allowsSource(2, "microphone"),
+        camera: canPublish && allowsSource(1, "camera"),
+        screenShare:
+          canPublish &&
+          (allowsSource(3, "screen_share") || allowsSource(4, "screen_share_audio")),
+        chat: canPublishData,
+      }));
+    };
+    room.on(RoomEvent.ParticipantPermissionsChanged, handlePermissionsChanged);
+    return () => {
+      room.off(RoomEvent.ParticipantPermissionsChanged, handlePermissionsChanged);
+    };
+  }, [localParticipant.identity, room]);
+
+  useEffect(() => {
+    const handleTrackUnmuted = (
+      publication: { source: Track.Source },
+      participant: LiveKitParticipant,
+    ) => {
+      const field =
+        publication.source === Track.Source.Microphone
+          ? "microphoneMuted"
+          : publication.source === Track.Source.Camera
+            ? "cameraOff"
+            : null;
+      if (!field) return;
+      setOptimisticParticipantActions((current) => {
+        const actions = { ...current[participant.identity] };
+        delete actions[field];
+        const next = { ...current };
+        if (Object.keys(actions).length) next[participant.identity] = actions;
+        else delete next[participant.identity];
+        return next;
+      });
+    };
+    room.on(RoomEvent.TrackUnmuted, handleTrackUnmuted);
+    return () => {
+      room.off(RoomEvent.TrackUnmuted, handleTrackUnmuted);
+    };
+  }, [room]);
+
+  useEffect(() => {
+    if (!chatAtBottomRef.current) return;
+    const list = chatListRef.current;
+    if (list) list.scrollTop = list.scrollHeight;
+  }, [chatMessages, chatOpen]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -1432,11 +1815,116 @@ function RoomTestControls({
     };
   }, [inviteMenuOpen]);
 
+  useEffect(() => {
+    if (!hostControlsOpen && !personMenuId) return;
+    function closeHostMenus(event: PointerEvent) {
+      const target = event.target as Node;
+      if (
+        !hostControlsRef.current?.contains(target) &&
+        !personMenuRef.current?.contains(target)
+      ) {
+        setHostControlsOpen(false);
+        setPersonMenuId(null);
+      }
+    }
+    function closeHostMenusOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setHostControlsOpen(false);
+        setPersonMenuId(null);
+      }
+    }
+    document.addEventListener("pointerdown", closeHostMenus);
+    document.addEventListener("keydown", closeHostMenusOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeHostMenus);
+      document.removeEventListener("keydown", closeHostMenusOnEscape);
+    };
+  }, [hostControlsOpen, personMenuId]);
+
   useEffect(() => () => {
     if (copiedTimerRef.current !== null) {
       window.clearTimeout(copiedTimerRef.current);
     }
+    if (observerCopiedTimerRef.current !== null) {
+      window.clearTimeout(observerCopiedTimerRef.current);
+    }
+    if (permissionNoticeTimerRef.current !== null) {
+      window.clearTimeout(permissionNoticeTimerRef.current);
+    }
   }, []);
+
+  useEffect(() => {
+    if (!isHostClassRole) return;
+    let active = true;
+    const refreshParticipants = async () => {
+      try {
+        const result = await getSessionParticipants(sessionId);
+        if (!active) return;
+        participantsLoadedRef.current = true;
+        setHostParticipants((current) => {
+          const currentById = new Map(current.map((participant) => [participant.id, participant]));
+          return result.participants
+            .filter(
+              (participant) =>
+                !pendingHostOperationsRef.current.has(`participant:${participant.id}:remove`),
+            )
+            .map((participant) => {
+              const existing = currentById.get(participant.id);
+              if (!existing) return participant;
+              const permissions = { ...participant.permissions };
+              for (const key of permissionKeys) {
+                if (pendingHostOperationsRef.current.has(`person:${participant.id}:${key}`) ||
+                  pendingHostOperationsRef.current.has(`everyone:${key}`)) {
+                  permissions[key] = existing.permissions[key];
+                }
+              }
+              return { ...participant, permissions };
+            });
+        });
+        setDefaultPermissions((current) => {
+          const permissions = { ...result.defaultPermissions };
+          for (const key of permissionKeys) {
+            if (pendingHostOperationsRef.current.has(`everyone:${key}`)) {
+              permissions[key] = current[key];
+            }
+          }
+          return permissions;
+        });
+        const self = result.participants.find(
+          (participant) => participant.id === localParticipant.identity,
+        );
+        if (self) {
+          setMyPermissions((current) => {
+            const permissions = { ...self.permissions };
+            for (const key of permissionKeys) {
+              if (pendingHostOperationsRef.current.has(`person:${self.id}:${key}`) ||
+                pendingHostOperationsRef.current.has(`everyone:${key}`)) {
+                permissions[key] = current[key];
+              }
+            }
+            return permissions;
+          });
+        }
+        setPeopleError("");
+        setParticipantsLoadError("");
+        setHostControlsLoading(false);
+      } catch {
+        if (active && !participantsLoadedRef.current) {
+          setParticipantsLoadError("Could not load participants. Please try again.");
+          setHostControlsLoading(false);
+        }
+      }
+    };
+
+    refreshHostParticipantsRef.current = () => {
+      void refreshParticipants();
+    };
+    void refreshParticipants();
+    return () => {
+      active = false;
+      refreshHostParticipantsRef.current = () => undefined;
+    };
+  }, [isHostClassRole, localParticipant.identity, participantSignature, sessionId]);
 
   useEffect(() => {
     if (!isHostClassRole) {
@@ -1459,7 +1947,7 @@ function RoomTestControls({
     }
 
     void pollWaitingGuests();
-    const timer = window.setInterval(() => void pollWaitingGuests(), 3000);
+    const timer = window.setInterval(() => void pollWaitingGuests(), 30_000);
     return () => {
       active = false;
       window.clearInterval(timer);
@@ -1480,6 +1968,56 @@ function RoomTestControls({
     [ConnectionState.SignalReconnecting]: "reconnecting",
     [ConnectionState.Disconnected]: "disconnected",
   }[connectionState] ?? "disconnected";
+
+  async function transmitChatMessage(localKey: string, body: string) {
+    if (classRole === "observer" || !myPermissions.chat) return;
+    setChatSending(true);
+    setChatMessages((current) =>
+      current.map((item) =>
+        item.localKey === localKey ? { ...item, delivery: "sending" } : item,
+      ),
+    );
+    try {
+      const saved = await sendChatMessage(sessionId, body);
+      setChatMessages((current) =>
+        mergeChatEntries(current, [saved], localParticipant.identity),
+      );
+    } catch {
+      setChatMessages((current) =>
+        current.map((item) =>
+          item.localKey === localKey && item.delivery !== "sent"
+            ? { ...item, delivery: "failed" }
+            : item,
+        ),
+      );
+    } finally {
+      setChatSending(false);
+    }
+  }
+
+  function submitChatMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const body = chatDraft.trim();
+    if (!body || body.length > 2000 || classRole === "observer" || !myPermissions.chat || chatSending) {
+      return;
+    }
+    const localKey = `local-${Date.now()}-${nextChatLocalKeyRef.current++}`;
+    const message: ChatMessage = {
+      id: localKey,
+      senderName: localParticipant.name || localParticipant.identity,
+      senderRole: classRole,
+      participantId: localParticipant.identity,
+      body,
+      createdAt: new Date().toISOString(),
+    };
+    const entry: ChatEntry = { message, delivery: "sending", localKey };
+    setChatMessages((current) => [
+      ...current,
+      entry,
+    ].slice(-maxRenderedChatMessages));
+    setChatDraft("");
+    void transmitChatMessage(localKey, body);
+  }
 
   async function toggleMicrophone() {
     try {
@@ -1572,6 +2110,217 @@ function RoomTestControls({
     }
   }
 
+  async function toggleHostControls() {
+    const opening = !hostControlsOpen;
+    setHostControlsOpen(opening);
+    if (!opening) return;
+    setHostControlsError("");
+    setObserverLinkError("");
+    setObserverLinkCopied(false);
+    setObserverLink(null);
+    setObserverLinkLoading(true);
+    try {
+      const result = await createSpaceLink(spaceId, "observer");
+      const parsed = new URL(result.link, window.location.origin);
+      setObserverLink(`${window.location.origin}${parsed.pathname}${parsed.search}`);
+    } catch (cause) {
+      setObserverLinkError(
+        cause instanceof Error ? cause.message : "Unable to load the observer link.",
+      );
+    } finally {
+      setObserverLinkLoading(false);
+    }
+  }
+
+  async function copyObserverLink() {
+    if (!observerLink) return;
+    try {
+      try {
+        await navigator.clipboard.writeText(observerLink);
+      } catch {
+        const input = document.createElement("textarea");
+        input.value = observerLink;
+        input.setAttribute("readonly", "");
+        input.style.position = "fixed";
+        input.style.opacity = "0";
+        document.body.appendChild(input);
+        let copied = false;
+        try {
+          input.select();
+          copied = document.execCommand("copy");
+        } finally {
+          document.body.removeChild(input);
+        }
+        if (!copied) throw new Error("Copying is blocked by this browser.");
+      }
+      setObserverLinkCopied(true);
+      if (observerCopiedTimerRef.current !== null) {
+        window.clearTimeout(observerCopiedTimerRef.current);
+      }
+      observerCopiedTimerRef.current = window.setTimeout(
+        () => setObserverLinkCopied(false),
+        2000,
+      );
+    } catch (cause) {
+      setObserverLinkError(cause instanceof Error ? cause.message : "Unable to copy the link.");
+    }
+  }
+
+  function beginHostOperation(key: string): boolean {
+    if (pendingHostOperationsRef.current.has(key)) return false;
+    pendingHostOperationsRef.current.add(key);
+    setPendingHostOperations(new Set(pendingHostOperationsRef.current));
+    return true;
+  }
+
+  function finishHostOperation(key: string): void {
+    pendingHostOperationsRef.current.delete(key);
+    setPendingHostOperations(new Set(pendingHostOperationsRef.current));
+  }
+
+  async function toggleEveryonePermission(key: PermissionKey) {
+    const operationKey = `everyone:${key}`;
+    if (!beginHostOperation(operationKey)) return;
+    const value = !defaultPermissions[key];
+    const previous = defaultPermissions[key];
+    const previousParticipantValues = new Map(
+      hostParticipants.map((participant) => [participant.id, participant.permissions[key]]),
+    );
+    const previousSelfValue = myPermissions[key];
+    setDefaultPermissions((current) => ({ ...current, [key]: value }));
+    setHostParticipants((current) =>
+      current.map((participant) => ({
+        ...participant,
+        permissions: { ...participant.permissions, [key]: value },
+      })),
+    );
+    const self = hostParticipants.find((participant) => participant.id === localParticipant.identity);
+    if (self) setMyPermissions((current) => ({ ...current, [key]: value }));
+    setHostControlsError("");
+    try {
+      await updateEveryonePermissions(sessionId, { [key]: value });
+      refreshHostParticipantsRef.current();
+    } catch (cause) {
+      setDefaultPermissions((current) => ({ ...current, [key]: previous }));
+      setHostParticipants((current) =>
+        current.map((participant) => ({
+          ...participant,
+          permissions: {
+            ...participant.permissions,
+            [key]: previousParticipantValues.get(participant.id) ?? participant.permissions[key],
+          },
+        })),
+      );
+      if (self) setMyPermissions((current) => ({ ...current, [key]: previousSelfValue }));
+      setHostControlsError(cause instanceof Error ? cause.message : "Could not update permissions.");
+    } finally {
+      finishHostOperation(operationKey);
+    }
+  }
+
+  async function togglePersonPermission(
+    participant: SessionParticipant,
+    key: PermissionKey,
+  ) {
+    const operationKey = `person:${participant.id}:${key}`;
+    if (!beginHostOperation(operationKey)) return;
+    const value = !participant.permissions[key];
+    const previous = participant.permissions[key];
+    setHostParticipants((current) =>
+      current.map((person) =>
+        person.id === participant.id
+          ? { ...person, permissions: { ...person.permissions, [key]: value } }
+          : person,
+      ),
+    );
+    if (participant.id === localParticipant.identity) {
+      setMyPermissions((current) => ({ ...current, [key]: value }));
+    }
+    setPeopleError("");
+    try {
+      await updateParticipantPermissions(sessionId, participant.id, { [key]: value });
+      refreshHostParticipantsRef.current();
+    } catch (cause) {
+      setHostParticipants((current) =>
+        current.map((person) =>
+          person.id === participant.id
+            ? { ...person, permissions: { ...person.permissions, [key]: previous } }
+            : person,
+        ),
+      );
+      if (participant.id === localParticipant.identity) {
+        setMyPermissions((current) => ({ ...current, [key]: previous }));
+      }
+      setPeopleError(cause instanceof Error ? cause.message : "Could not update permissions.");
+    } finally {
+      finishHostOperation(operationKey);
+    }
+  }
+
+  async function performParticipantAction(
+    participant: SessionParticipant,
+    action: "mute" | "camera-off",
+  ) {
+    const operationKey = `participant:${participant.id}:${action}`;
+    if (!beginHostOperation(operationKey)) return;
+    setBusyParticipantId(participant.id);
+    setPeopleError("");
+    setOptimisticParticipantActions((current) => ({
+      ...current,
+      [participant.id]: {
+        ...current[participant.id],
+        ...(action === "mute" ? { microphoneMuted: true } : { cameraOff: true }),
+      },
+    }));
+    try {
+      await manageParticipant(sessionId, participant.id, action);
+      refreshHostParticipantsRef.current();
+      setPersonMenuId(null);
+    } catch (cause) {
+      setOptimisticParticipantActions((current) => {
+        const actions = { ...current[participant.id] };
+        if (action === "mute") delete actions.microphoneMuted;
+        else delete actions.cameraOff;
+        const next = { ...current };
+        if (Object.keys(actions).length) next[participant.id] = actions;
+        else delete next[participant.id];
+        return next;
+      });
+      setPeopleError(cause instanceof Error ? cause.message : "Could not update the participant.");
+    } finally {
+      setBusyParticipantId(null);
+      finishHostOperation(operationKey);
+    }
+  }
+
+  async function confirmRemoveParticipant() {
+    const target = removeTarget;
+    if (!target) return;
+    const operationKey = `participant:${target.id}:remove`;
+    if (!beginHostOperation(operationKey)) return;
+    setBusyParticipantId(target.id);
+    const originalIndex = hostParticipants.findIndex((person) => person.id === target.id);
+    setHostParticipants((current) => current.filter((person) => person.id !== target.id));
+    setPeopleError("");
+    try {
+      await manageParticipant(sessionId, target.id, "remove");
+      refreshHostParticipantsRef.current();
+      setRemoveTarget(null);
+      setPersonMenuId(null);
+    } catch (cause) {
+      setHostParticipants((current) => {
+        if (current.some((person) => person.id === target.id)) return current;
+        const restored = [...current];
+        restored.splice(Math.max(0, originalIndex), 0, target);
+        return restored;
+      });
+      setPeopleError(cause instanceof Error ? cause.message : "Could not remove the participant.");
+    } finally {
+      setBusyParticipantId(null);
+      finishHostOperation(operationKey);
+    }
+  }
+
   async function respondToGuest(guest: WaitingParticipant, action: "admit" | "deny") {
     setBusyGuestId(guest.id);
     setWaitingError("");
@@ -1631,9 +2380,75 @@ function RoomTestControls({
         <button className="classroom-record-pill" disabled title="Coming soon" type="button">
           <i /> REC
         </button>
-        <button className="classroom-topbar-icon" disabled title="Coming soon" type="button">
-          <Crown aria-hidden="true" size={17} />
-        </button>
+        <div className="classroom-host-menu" ref={hostControlsRef}>
+          <button
+            aria-expanded={hostControlsOpen}
+            aria-haspopup="dialog"
+            aria-label="Host controls"
+            className="classroom-topbar-icon"
+            disabled={!isHostClassRole}
+            onClick={() => void toggleHostControls()}
+            title={isHostClassRole ? "Host controls" : "Host controls"}
+            type="button"
+          >
+            <Crown aria-hidden="true" size={17} />
+          </button>
+          {hostControlsOpen && isHostClassRole && (
+            <section aria-label="Host controls" className="classroom-host-popup" role="dialog">
+              <header>
+                <strong>Host controls</strong>
+                <button
+                  aria-label="Close host controls"
+                  className="classroom-host-close"
+                  onClick={() => setHostControlsOpen(false)}
+                  type="button"
+                >
+                  <X aria-hidden="true" size={16} />
+                </button>
+              </header>
+              <div className="classroom-host-section">
+                <span className="classroom-section-label">EVERYONE</span>
+                {hostControlsLoading ? (
+                  <div aria-label="Loading permissions" className="classroom-host-skeleton">
+                    {permissionKeys.map((key) => <i key={key} />)}
+                  </div>
+                ) : permissionKeys.map((key) => (
+                  <button 
+                    aria-checked={defaultPermissions[key]}
+                    className="classroom-permission-toggle"
+                    disabled={pendingHostOperations.has(`everyone:${key}`) || hostControlsLoading}
+                    key={key}
+                    onClick={() => void toggleEveryonePermission(key)}
+                    role="switch"
+                    type="button"
+                  >
+                    <span>{permissionLabels[key]}</span>
+                    <i className={defaultPermissions[key] ? "enabled" : ""} />
+                  </button>
+                ))}
+              </div>
+              <div className="classroom-observer-link">
+                <label htmlFor="classroom-observer-link">Observer link</label>
+                {observerLinkLoading ? (
+                  <span className="classroom-host-loading">Loading link…</span>
+                ) : observerLink ? (
+                  <div>
+                    <input id="classroom-observer-link" readOnly value={observerLink} />
+                    <button onClick={() => void copyObserverLink()} type="button">
+                      {observerLinkCopied ? "Copied ✓" : "Copy"}
+                    </button>
+                  </div>
+                ) : null}
+                {observerLinkError && <p role="alert">{observerLinkError}</p>}
+              </div>
+              <button className="classroom-leading-mode" disabled title="Coming soon" type="button">
+                <span>Leading Mode</span><small>Coming soon</small>
+              </button>
+              {hostControlsError && <p className="classroom-host-error" role="alert">{hostControlsError}</p>}
+              {participantsLoadError && <p className="classroom-host-error" role="alert">{participantsLoadError}</p>}
+            </section>
+          )}
+        </div>
         <button className="classroom-topbar-icon" disabled title="Coming soon" type="button">
           <Clock3 aria-hidden="true" size={17} />
         </button>
@@ -1666,7 +2481,7 @@ function RoomTestControls({
                 ) : inviteLink ? (
                   <div className="classroom-invite-rows">
                     <div className="classroom-invite-row">
-                      <label htmlFor="classroom-guest-link">Guest link</label>
+                      <label htmlFor="classroom-guest-link">Invite link</label>
                       <div>
                         <input
                           id="classroom-guest-link"
@@ -1722,6 +2537,7 @@ function RoomTestControls({
           <div className="classroom-whiteboard">
             <Suspense fallback={<div className="classroom-whiteboard-loading">Loading board…</div>}>
               <Whiteboard
+                canEdit={canEditBoard}
                 classRole={classRole}
                 displayName={localParticipant.name || localParticipant.identity}
                 sessionId={sessionId}
@@ -1767,8 +2583,139 @@ function RoomTestControls({
           )}
         </main>
 
-        <aside className="classroom-side-panel">
-          {peopleOpen ? (
+        <aside className={`classroom-side-panel${chatOpen ? " chat-open" : ""}`}>
+          {chatOpen ? (
+            <section aria-label="Class chat" className="classroom-chat-panel">
+              <header>
+                <div>
+                  <strong>Chat</strong>
+                  <span>Messages are saved in this space</span>
+                </div>
+                <button aria-label="Close chat panel" onClick={() => setChatOpen(false)} type="button">
+                  <X aria-hidden="true" size={17} />
+                </button>
+              </header>
+              <div
+                aria-live="polite"
+                aria-relevant="additions"
+                className="classroom-chat-messages"
+                onScroll={(event) => {
+                  const element = event.currentTarget;
+                  chatAtBottomRef.current =
+                    element.scrollHeight - element.scrollTop - element.clientHeight < 48;
+                }}
+                ref={chatListRef}
+                role="log"
+              >
+                {chatHistoryLoading && chatMessages.length === 0 && (
+                  <p className="classroom-chat-info">Loading messages…</p>
+                )}
+                {chatHistoryError && (
+                  <p className="classroom-chat-info" role="alert">
+                    {chatHistoryError}{" "}
+                    <button
+                      onClick={() => setChatHistoryAttempt((attempt) => attempt + 1)}
+                      type="button"
+                    >
+                      Retry
+                    </button>
+                  </p>
+                )}
+                {!chatHistoryLoading && !chatHistoryError && chatMessages.length === 0 && (
+                  <p className="classroom-chat-info">No messages yet. Start the conversation.</p>
+                )}
+                {chatMessages.map(({ message, delivery, localKey }) => {
+                  const ownMessage = message.participantId === localParticipant.identity;
+                  return (
+                    <article
+                      className={`classroom-chat-message${ownMessage ? " own" : ""}`}
+                      key={message.id}
+                    >
+                      <div className="classroom-chat-message-meta">
+                        <strong>
+                          {message.senderName || "Observer"}{ownMessage ? " (you)" : ""}
+                        </strong>
+                        <span className={`classroom-chat-role role-${message.senderRole}`}>
+                          {message.senderRole === "observer"
+                            ? "Observer"
+                            : formatClassRole(message.senderRole)}
+                        </span>
+                        <time dateTime={message.createdAt}>
+                          {new Date(message.createdAt).toLocaleTimeString([], {
+                            hour: "numeric",
+                            minute: "2-digit",
+                          })}
+                        </time>
+                      </div>
+                      <p>{message.body}</p>
+                      {delivery === "sending" && (
+                        <span className="classroom-chat-delivery">Sending…</span>
+                      )}
+                      {delivery === "failed" && (
+                        <span className="classroom-chat-delivery failed">
+                          Could not send.{" "}
+                          <button
+                            disabled={chatSending}
+                            onClick={() => {
+                              if (localKey) void transmitChatMessage(localKey, message.body);
+                            }}
+                            type="button"
+                          >
+                            Retry
+                          </button>
+                        </span>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+              {classRole === "observer" ? (
+                <p className="classroom-chat-observer-note">Observers can’t send messages</p>
+              ) : (
+                <>
+                  <form className="classroom-chat-composer" onSubmit={submitChatMessage}>
+                    <button
+                      aria-label="Attach file"
+                      className="classroom-chat-attach"
+                      disabled
+                      title="Coming soon"
+                      type="button"
+                    >
+                      <Paperclip aria-hidden="true" size={17} />
+                    </button>
+                    <textarea
+                      aria-label="Write a message"
+                      disabled={!myPermissions.chat}
+                      maxLength={2000}
+                      onChange={(event) => setChatDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && !event.shiftKey) {
+                          event.preventDefault();
+                          event.currentTarget.form?.requestSubmit();
+                        }
+                      }}
+                      placeholder="Write a message…"
+                      rows={2}
+                      title={!myPermissions.chat ? "Your tutor has turned this off" : undefined}
+                      value={chatDraft}
+                    />
+                    <button
+                      aria-label="Send message"
+                      className="classroom-chat-send"
+                      disabled={!myPermissions.chat || !chatDraft.trim() || chatSending || chatDraft.trim().length > 2000}
+                      title={!myPermissions.chat ? "Your tutor has turned this off" : "Send message"}
+                      type="submit"
+                    >
+                      <Send aria-hidden="true" size={16} />
+                    </button>
+                  </form>
+                  {!myPermissions.chat && (
+                    <p className="classroom-chat-observer-note">Your tutor has turned this off</p>
+                  )}
+                </>
+              )}
+            </section>
+          ) : peopleOpen ? (
             <div className="classroom-people-panel">
               <header>
                 <div>
@@ -1780,28 +2727,123 @@ function RoomTestControls({
                 </button>
               </header>
               <div className="classroom-people-section">
-                <span className="classroom-section-label">MAIN ROOM · {visibleParticipants.length}</span>
-                {visibleParticipants.map((participant, index) => {
-                  const isYou = participant.identity === localParticipant.identity;
-                  const role = readParticipantRole(participant) ?? (isYou ? classRole : null);
-                  const name = participant.name || participant.identity;
-                  const muted = !participant.getTrackPublication(Track.Source.Microphone) ||
-                    participant.getTrackPublication(Track.Source.Microphone)?.isMuted;
-                  return (
-                    <div className="classroom-person-row" key={participant.identity}>
-                      <span className={`classroom-person-avatar avatar-color-${index % 4}`}>{getInitials(name)}</span>
-                      <span className="classroom-person-copy">
-                        <strong>{name}{isYou ? " (you)" : ""}</strong>
-                        <span>{formatClassRole(role)}{muted ? " · Muted" : ""}</span>
-                      </span>
-                      {!isYou && (
-                        <button aria-label={`${name} options`} className="classroom-person-menu" disabled title="Coming soon" type="button">
-                          <MoreVertical aria-hidden="true" size={16} />
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
+                <span className="classroom-section-label">
+                  MAIN ROOM · {isHostClassRole ? hostParticipants.length : visibleParticipants.length}
+                </span>
+                {peopleError && <p className="classroom-host-error" role="alert">{peopleError}</p>}
+                {participantsLoadError && <p className="classroom-host-error" role="alert">{participantsLoadError}</p>}
+                {isHostClassRole && hostControlsLoading ? (
+                  <div aria-label="Loading participants" className="classroom-people-skeleton">
+                    {[0, 1, 2].map((row) => <i key={row} />)}
+                  </div>
+                ) : isHostClassRole ? (
+                  hostParticipants.map((participant, index) => {
+                    const isYou = participant.id === localParticipant.identity;
+                    const liveParticipant = participants.find(
+                      (person) => person.identity === participant.id,
+                    );
+                    const microphoneMuted =
+                      optimisticParticipantActions[participant.id]?.microphoneMuted === true ||
+                      Boolean(liveParticipant?.getTrackPublication(Track.Source.Microphone)?.isMuted);
+                    const cameraOff =
+                      optimisticParticipantActions[participant.id]?.cameraOff === true ||
+                      !liveParticipant?.getTrackPublication(Track.Source.Camera) ||
+                      Boolean(liveParticipant?.getTrackPublication(Track.Source.Camera)?.isMuted);
+                    return (
+                      <div
+                        className="classroom-person-row host-person-row"
+                        key={participant.id}
+                        ref={personMenuId === participant.id ? personMenuRef : null}
+                      >
+                        <span className={`classroom-person-avatar avatar-color-${index % 4}`}>{getInitials(participant.name)}</span>
+                        <span className="classroom-person-copy">
+                          <strong>{participant.name}{isYou ? " (you)" : ""}</strong>
+                          <span>
+                            {formatClassRole(participant.role)}
+                            {microphoneMuted ? " · Muted" : ""}
+                            {cameraOff ? " · Camera off" : ""}
+                          </span>
+                        </span>
+                        {!isYou && (
+                          <button
+                            aria-expanded={personMenuId === participant.id}
+                            aria-label={`${participant.name} options`}
+                            className="classroom-person-menu"
+                            onClick={() => setPersonMenuId((current) => current === participant.id ? null : participant.id)}
+                            type="button"
+                          >
+                            <MoreVertical aria-hidden="true" size={16} />
+                          </button>
+                        )}
+                        {personMenuId === participant.id && !isYou && (
+                          <div className="classroom-person-options" role="menu">
+                            <button
+                              disabled={pendingHostOperations.has(`participant:${participant.id}:mute`)}
+                              onClick={() => void performParticipantAction(participant, "mute")}
+                              role="menuitem"
+                              type="button"
+                            >
+                              {pendingHostOperations.has(`participant:${participant.id}:mute`) ? "Muting…" : "Mute microphone"}
+                            </button>
+                            <button
+                              disabled={pendingHostOperations.has(`participant:${participant.id}:camera-off`)}
+                              onClick={() => void performParticipantAction(participant, "camera-off")}
+                              role="menuitem"
+                              type="button"
+                            >
+                              {pendingHostOperations.has(`participant:${participant.id}:camera-off`) ? "Turning off…" : "Turn camera off"}
+                            </button>
+                            <div className="classroom-person-permissions">
+                              <strong>Permissions</strong>
+                              {permissionKeys.map((key) => (
+                                <button
+                                  aria-checked={participant.permissions[key]}
+                                  className="classroom-permission-toggle"
+                                  disabled={pendingHostOperations.has(`person:${participant.id}:${key}`)}
+                                  key={key}
+                                  onClick={() => void togglePersonPermission(participant, key)}
+                                  role="switch"
+                                  type="button"
+                                >
+                                  <span>{permissionLabels[key]}</span>
+                                  <i className={participant.permissions[key] ? "enabled" : ""} />
+                                </button>
+                              ))}
+                            </div>
+                            <button
+                              className="remove-person"
+                              onClick={() => {
+                                setRemoveTarget(participant);
+                                setPersonMenuId(null);
+                              }}
+                              role="menuitem"
+                              type="button"
+                            >
+                              Remove from class
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                ) : (
+                  visibleParticipants.map((participant, index) => {
+                    const isYou = participant.identity === localParticipant.identity;
+                    const role = readParticipantRole(participant) ?? (isYou ? classRole : null);
+                    const name = participant.name || participant.identity;
+                    const muted = !participant.getTrackPublication(Track.Source.Microphone) ||
+                      participant.getTrackPublication(Track.Source.Microphone)?.isMuted;
+                    return (
+                      <div className="classroom-person-row" key={participant.identity}>
+                        <span className={`classroom-person-avatar avatar-color-${index % 4}`}>{getInitials(name)}</span>
+                        <span className="classroom-person-copy">
+                          <strong>{name}{isYou ? " (you)" : ""}</strong>
+                          <span>{formatClassRole(role)}{muted ? " · Muted" : ""}</span>
+                        </span>
+                      </div>
+                    );
+                  })
+                )}
               </div>
             </div>
           ) : (
@@ -1854,6 +2896,10 @@ function RoomTestControls({
           )}
         </aside>
 
+        {permissionNotice && (
+          <div className="classroom-permission-notice" role="status">{permissionNotice}</div>
+        )}
+
         {isHostClassRole && (
           <nav aria-label="Participant layout" className="classroom-layout-bar">
             <button aria-label="Grid layout" aria-pressed={layout === "grid"} className={layout === "grid" ? "selected" : ""} onClick={() => setLayout("grid")} title="Grid" type="button">
@@ -1873,11 +2919,13 @@ function RoomTestControls({
           <button
             aria-label={isScreenShareEnabled ? "Stop sharing screen" : "Share screen"}
             className={isScreenShareEnabled ? "selected" : ""}
-            disabled={!canPublish || screenSharePending}
+            disabled={!canUseScreenShare || screenSharePending}
             onClick={() => void toggleScreenShare()}
             title={
               !canPublish
                 ? "Observers cannot share"
+                : !myPermissions.screenShare
+                  ? "Your tutor has turned this off"
                 : screenSharePending
                   ? "Waiting for screen selection"
                   : isScreenShareEnabled
@@ -1888,18 +2936,39 @@ function RoomTestControls({
           >
             <MonitorUp aria-hidden="true" size={17} />
           </button>
-          <button aria-label={isMicrophoneEnabled ? "Mute microphone" : "Turn microphone on"} className={isMicrophoneEnabled ? "" : "control-off"} disabled={!canPublish} onClick={() => void toggleMicrophone()} title={canPublish ? (isMicrophoneEnabled ? "Mute microphone" : "Turn microphone on") : "Observers cannot publish"} type="button">
+          <button aria-label={isMicrophoneEnabled ? "Mute microphone" : "Turn microphone on"} className={isMicrophoneEnabled ? "" : "control-off"} disabled={!canUseMicrophone} onClick={() => void toggleMicrophone()} title={!canPublish ? "Observers cannot publish" : !myPermissions.microphone ? "Your tutor has turned this off" : (isMicrophoneEnabled ? "Mute microphone" : "Turn microphone on")} type="button">
             {isMicrophoneEnabled ? <Mic aria-hidden="true" size={17} /> : <MicOff aria-hidden="true" size={17} />}
           </button>
-          <button aria-label={isCameraEnabled ? "Turn camera off" : "Turn camera on"} className={isCameraEnabled ? "" : "control-off"} disabled={!canPublish} onClick={() => void toggleCamera()} title={canPublish ? (isCameraEnabled ? "Turn camera off" : "Turn camera on") : "Observers cannot publish"} type="button">
+          <button aria-label={isCameraEnabled ? "Turn camera off" : "Turn camera on"} className={isCameraEnabled ? "" : "control-off"} disabled={!canUseCamera} onClick={() => void toggleCamera()} title={!canPublish ? "Observers cannot publish" : !myPermissions.camera ? "Your tutor has turned this off" : (isCameraEnabled ? "Turn camera off" : "Turn camera on")} type="button">
             {isCameraEnabled ? <Video aria-hidden="true" size={17} /> : <CameraOff aria-hidden="true" size={17} />}
           </button>
           <button aria-label="Raise hand" disabled title="Coming soon" type="button"><Hand aria-hidden="true" size={17} /></button>
           <button aria-label="Reactions" disabled title="Coming soon" type="button"><Smile aria-hidden="true" size={17} /></button>
-          <button aria-label={peopleOpen ? "Close people panel" : "Open people panel"} className={peopleOpen ? "selected" : ""} onClick={() => setPeopleOpen((open) => !open)} title="People" type="button">
+          <button aria-label={peopleOpen ? "Close people panel" : "Open people panel"} className={peopleOpen ? "selected" : ""} onClick={() => {
+            setChatOpen(false);
+            setPeopleOpen((open) => !open);
+          }} title="People" type="button">
             <UsersRound aria-hidden="true" size={17} />
           </button>
-          <button aria-label="Chat" disabled title="Coming soon" type="button"><MessageCircle aria-hidden="true" size={17} /></button>
+          <button
+            aria-label={chatOpen ? "Close chat panel" : "Open chat panel"}
+            className={chatOpen ? "selected" : ""}
+            onClick={() => {
+              const opening = !chatOpen;
+              setChatOpen(opening);
+              setPeopleOpen(false);
+              if (opening) setChatUnread(0);
+            }}
+            title="Chat"
+            type="button"
+          >
+            <MessageCircle aria-hidden="true" size={17} />
+            {chatUnread > 0 && !chatOpen && (
+              <span aria-label={`${chatUnread} unread messages`} className="classroom-chat-unread">
+                {chatUnread > 99 ? "99+" : chatUnread}
+              </span>
+            )}
+          </button>
         </nav>
       </div>
 
@@ -1921,11 +2990,46 @@ function RoomTestControls({
           </section>
         </div>
       )}
+      {removeTarget && (
+        <div
+          className="dialog-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && busyParticipantId === null) {
+              setRemoveTarget(null);
+            }
+          }}
+        >
+          <section aria-labelledby="remove-participant-title" aria-modal="true" className="space-dialog" role="dialog">
+            <span className="eyebrow destructive-eyebrow">REMOVE PARTICIPANT</span>
+            <h2 id="remove-participant-title">Remove {removeTarget.name}?</h2>
+            <p className="delete-confirmation">They can’t rejoin this class.</p>
+            {peopleError && <p className="dialog-error" role="alert">{peopleError}</p>}
+            <div className="dialog-actions">
+              <button
+                className="secondary-button"
+                disabled={busyParticipantId === removeTarget.id}
+                onClick={() => setRemoveTarget(null)}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="destructive-button"
+                disabled={busyParticipantId === removeTarget.id}
+                onClick={() => void confirmRemoveParticipant()}
+                type="button"
+              >
+                {busyParticipantId === removeTarget.id ? "Removing..." : "Remove"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </section>
   );
 }
 
-type JoinStep = "checking" | "signed-in" | "guest" | "waiting" | "denied" | "invalid" | "error";
+type JoinStep = "checking" | "signed-in" | "guest" | "waiting" | "denied" | "removed" | "invalid" | "error";
 
 function getJoinPath(state: unknown): string | null {
   if (
@@ -2037,6 +3141,11 @@ function JoinPage() {
           setStep("denied");
           return;
         }
+        if (existing.spaceId === resolvedSpace.id && existing.status === "removed") {
+          setSessionId(existing.sessionId);
+          setStep("removed");
+          return;
+        }
       } catch (cause) {
         if (!(cause instanceof ApiError && [401, 404].includes(cause.status))) {
           if (active) {
@@ -2058,16 +3167,39 @@ function JoinPage() {
   useEffect(() => {
     if (step !== "waiting" || !sessionId) return;
     let active = true;
+    const applyStatus = (status: string) => {
+      if (status === "admitted") {
+        navigate("/lobby", { state: { spaceName, fromJoin: true, joinPath } });
+      } else if (status === "denied") {
+        setStep("denied");
+      } else if (status === "removed") {
+        setStep("removed");
+      }
+    };
+    const events = new EventSource(getJoinEventsUrl(), { withCredentials: true });
+    const onStatus = (event: Event) => {
+      if (!active) return;
+      try {
+        const payload: unknown = JSON.parse((event as MessageEvent<string>).data);
+        if (
+          typeof payload === "object" &&
+          payload !== null &&
+          "status" in payload &&
+          typeof payload.status === "string"
+        ) {
+          applyStatus(payload.status);
+        }
+      } catch {
+        return;
+      }
+    };
+    events.addEventListener("status", onStatus);
     const timer = window.setInterval(() => {
-      getJoinStatus()
+      void getJoinStatus()
         .then((result) => {
           if (!active) return;
           setSessionId(result.sessionId);
-          if (result.status === "admitted") {
-            navigate("/lobby", { state: { spaceName, fromJoin: true, joinPath } });
-          } else if (result.status === "denied") {
-            setStep("denied");
-          }
+          applyStatus(result.status);
         })
         .catch(() => {
           if (active) {
@@ -2075,9 +3207,11 @@ function JoinPage() {
             setStep("error");
           }
         });
-    }, 3000);
+    }, 10_000);
     return () => {
       active = false;
+      events.removeEventListener("status", onStatus);
+      events.close();
       window.clearInterval(timer);
     };
   }, [joinPath, navigate, sessionId, spaceName, step]);
@@ -2096,7 +3230,11 @@ function JoinPage() {
         setStep(result.participant.status);
       }
     } catch (cause) {
-      setError(joinFailureMessage(cause, "We couldn’t join this class. Check your connection and try again."));
+      if (cause instanceof ApiError && cause.status === 403 && cause.message.includes("removed")) {
+        setStep("removed");
+      } else {
+        setError(joinFailureMessage(cause, "We couldn’t join this class. Check your connection and try again."));
+      }
     } finally {
       setBusy(false);
     }
@@ -2115,7 +3253,11 @@ function JoinPage() {
         setStep(result.participant.status);
       }
     } catch (cause) {
-      setError(joinFailureMessage(cause, "We couldn’t join this class. Check your connection and try again."));
+      if (cause instanceof ApiError && cause.status === 403 && cause.message.includes("removed")) {
+        setStep("removed");
+      } else {
+        setError(joinFailureMessage(cause, "We couldn’t join this class. Check your connection and try again."));
+      }
     } finally {
       setBusy(false);
     }
@@ -2202,6 +3344,18 @@ function JoinPage() {
       <JoinPageFrame>
         <div className="join-icon"><UsersRound aria-hidden="true" size={25} /></div>
         <h1>The tutor couldn’t let you in this time</h1>
+        <button className="join-back-link" onClick={() => navigate(-1)} type="button">
+          <span aria-hidden="true">‹</span> Back
+        </button>
+      </JoinPageFrame>
+    );
+  }
+
+  if (step === "removed") {
+    return (
+      <JoinPageFrame>
+        <div className="join-icon"><X aria-hidden="true" size={25} /></div>
+        <h1>You were removed from this class</h1>
         <button className="join-back-link" onClick={() => navigate(-1)} type="button">
           <span aria-hidden="true">‹</span> Back
         </button>

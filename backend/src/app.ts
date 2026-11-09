@@ -8,6 +8,7 @@ import swaggerUi from "@fastify/swagger-ui";
 import { config } from "./config.js";
 import { authRoutes } from "./modules/auth/routes.js";
 import { boardRoutes } from "./modules/boards/routes.js";
+import { chatRoutes } from "./modules/chat/routes.js";
 import { inviteRoutes } from "./modules/invites/routes.js";
 import { joinRoutes } from "./modules/join/routes.js";
 import { livekitRoutes } from "./modules/livekit/routes.js";
@@ -22,6 +23,7 @@ export function buildApp() {
   app.register(cors, {
     origin: config.FRONTEND_ORIGIN,
     credentials: true,
+    methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
   });
   app.register(rateLimit, {
     global: false,
@@ -77,6 +79,7 @@ export function buildApp() {
   app.register(joinRoutes);
   app.register(livekitRoutes);
   app.register(boardRoutes);
+  app.register(chatRoutes);
   app.register(sessionRoutes);
 
   app.get(

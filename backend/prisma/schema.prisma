@@ -53,6 +53,7 @@ model Space {
   createdAt         DateTime @default(now())
   lastUsedAt        DateTime?
   sessions          Session[]
+  chatMessages      ChatMessage[]
 
   @@index([creatorId])
   @@index([name])
@@ -66,7 +67,9 @@ model Session {
   startedAt    DateTime      @default(now())
   endedAt      DateTime?
   endedBy      String?       @db.Uuid
+  defaultPermissions Json    @default("{\"editing\":true,\"microphone\":true,\"camera\":true,\"screenShare\":true,\"raiseHand\":true,\"reactions\":true,\"chat\":true,\"fileUploads\":true}")
   participants Participant[]
+  chatMessages  ChatMessage[]
 
   @@index([spaceId, endedAt])
   @@index([spaceId, startedAt])
@@ -86,6 +89,8 @@ model Participant {
   joinedAt    DateTime          @default(now())
   admittedAt  DateTime?
   leftAt      DateTime?
+  permissions Json @default("{\"editing\":true,\"microphone\":true,\"camera\":true,\"screenShare\":true,\"raiseHand\":true,\"reactions\":true,\"chat\":true,\"fileUploads\":true}")
+  chatMessages ChatMessage[]
 
   @@index([sessionId, status])
   @@index([sessionId, status, joinedAt])
@@ -100,4 +105,21 @@ model Board {
   updatedAt DateTime @updatedAt
 
   @@map("boards")
+}
+
+model ChatMessage {
+  id            String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  spaceId       String      @db.Uuid
+  space         Space       @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  sessionId     String      @db.Uuid
+  session       Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  participantId String      @db.Uuid
+  participant   Participant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  senderName    String
+  senderRole    ClassRole
+  body          String
+  createdAt     DateTime    @default(now())
+
+  @@index([spaceId, createdAt])
+  @@map("chat_messages")
 }

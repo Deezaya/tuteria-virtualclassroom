@@ -1,6 +1,11 @@
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
+import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "../../db.js";
+import { config } from "../../config.js";
+import { defaultPermissions } from "../sessions/permissions.js";
+import { publishWaitingListChanged } from "../sessions/service.js";
+import { emitJoinStatus, subscribeToJoinStatus } from "./events.js";
 import {
   createObserverRandomId,
   getOptionalUser,
@@ -83,6 +88,7 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
           400: errorResponse,
           429: errorResponse,
           404: errorResponse,
+          403: errorResponse,
           500: errorResponse,
         },
       },
@@ -123,10 +129,26 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
         prisma.session.findFirst({
           where: { spaceId: space.id },
           orderBy: { startedAt: "desc" },
-          select: { id: true, endedAt: true },
+          select: { id: true, endedAt: true, defaultPermissions: true },
         }),
       ]);
       const currentParticipantId = getParticipantCookieId(request);
+      if (!observer && latestSession && !latestSession.endedAt) {
+        const previouslyRemoved = await prisma.participant.findFirst({
+          where: {
+            sessionId: latestSession.id,
+            status: "removed",
+            OR: [
+              ...(currentParticipantId ? [{ id: currentParticipantId }] : []),
+              ...(user ? [{ userId: user.id }] : []),
+            ],
+          },
+          select: { id: true },
+        });
+        if (previouslyRemoved) {
+          return reply.code(403).send({ message: "You were removed from this class" });
+        }
+      }
       if (!observer && currentParticipantId && latestSession) {
         const previouslyDenied = await prisma.participant.findFirst({
           where: {
@@ -153,7 +175,7 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
           ? latestSession
           : await prisma.session.create({
           data: { spaceId: space.id },
-          select: { id: true },
+          select: { id: true, defaultPermissions: true },
         });
 
       const classRole = observer
@@ -175,6 +197,7 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
             displayName: observer ? null : user?.name ?? parsed.data.name,
             classRole,
             status,
+            permissions: (session.defaultPermissions ?? defaultPermissions) as Prisma.InputJsonValue,
             admittedAt: status === "admitted" ? now : null,
             randomId: observer ? createObserverRandomId() : null,
           },
@@ -185,6 +208,15 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
           data: { lastUsedAt: now },
         }),
       ]);
+
+      if (status === "waiting") {
+        void publishWaitingListChanged(session.id).catch((error: unknown) => {
+          request.log.error(
+            { err: error, sessionId: session.id },
+            "Could not notify session hosts about a waiting guest.",
+          );
+        });
+      }
 
       return reply
         .code(201)
@@ -200,6 +232,110 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
   );
 
   app.get(
+    "/join/events",
+    {
+      schema: {
+        tags: ["Join"],
+        summary: "Stream join status changes for the current waiting guest",
+        security: [{ participantCookieAuth: [] }],
+        response: {
+          200: {
+            type: "string",
+            description: "Server-sent join status events",
+            content: {
+              "text/event-stream": {
+                schema: { type: "string" },
+              },
+            },
+          },
+          401: errorResponse,
+          404: errorResponse,
+          500: errorResponse,
+        },
+      },
+    },
+    async (request, reply) => {
+      const participantId = getParticipantCookieId(request);
+      if (!participantId) {
+        return reply.code(401).send({ message: "Join session not found" });
+      }
+
+      let active = false;
+      let closed = false;
+      const queuedStatuses: Array<"admitted" | "denied" | "removed"> = [];
+      const raw = reply.raw;
+      let keepAlive: ReturnType<typeof setInterval> | null = null;
+      const sendStatus = (status: "admitted" | "denied" | "removed") => {
+        if (active && !raw.destroyed) {
+          raw.write(`event: status\ndata: ${JSON.stringify({ status })}\n\n`);
+        } else {
+          queuedStatuses.push(status);
+        }
+      };
+      const unsubscribe = subscribeToJoinStatus(participantId, sendStatus);
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        if (keepAlive !== null) clearInterval(keepAlive);
+        unsubscribe();
+        raw.off("close", cleanup);
+        request.raw.socket.off("close", cleanup);
+      };
+
+      let participant;
+      try {
+        participant = await prisma.participant.findUnique({
+          where: { id: participantId },
+          select: { classRole: true, status: true },
+        });
+      } catch (error) {
+        unsubscribe();
+        throw error;
+      }
+
+      if (
+        !participant ||
+        participant.classRole !== "guest" ||
+        !["waiting", "admitted", "denied", "removed"].includes(participant.status)
+      ) {
+        cleanup();
+        return reply.code(404).send({ message: "Join status not found" });
+      }
+
+      reply.hijack();
+      raw.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+        "Access-Control-Allow-Origin": config.FRONTEND_ORIGIN,
+        "Access-Control-Allow-Credentials": "true",
+        Vary: "Origin",
+      });
+      raw.flushHeaders();
+      raw.write(": connected\n\n");
+      active = true;
+      raw.on("close", cleanup);
+      request.raw.socket.on("close", cleanup);
+
+      if (participant.status !== "waiting") {
+        raw.write(`event: status\ndata: ${JSON.stringify({ status: participant.status })}\n\n`);
+        cleanup();
+        raw.end();
+        return;
+      }
+
+      for (const status of queuedStatuses) {
+        raw.write(`event: status\ndata: ${JSON.stringify({ status })}\n\n`);
+      }
+      queuedStatuses.length = 0;
+      keepAlive = setInterval(() => {
+        if (!raw.destroyed) raw.write(": keep-alive\n\n");
+      }, 25_000);
+    },
+  );
+
+  app.get(
     "/join/status",
     {
       schema: {
@@ -209,7 +345,7 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
           200: {
             type: "object",
             properties: {
-              status: { type: "string", enum: ["waiting", "admitted", "denied"] },
+              status: { type: "string", enum: ["waiting", "admitted", "denied", "removed"] },
               sessionId: { type: "string" },
               spaceId: { type: "string" },
               spaceName: { type: "string" },
@@ -244,7 +380,7 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
       });
       if (
         !participant ||
-        !["waiting", "admitted", "denied"].includes(participant.status)
+        !["waiting", "admitted", "denied", "removed"].includes(participant.status)
       ) {
         return reply.code(404).send({ message: "Join status not found" });
       }

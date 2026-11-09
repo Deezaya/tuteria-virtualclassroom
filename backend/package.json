@@ -24,6 +24,7 @@
     "@hocuspocus/server": "^4.8.0",
     "@prisma/client": "^6.16.2",
     "argon2": "^0.44.0",
+    "crossws": "^0.4.17",
     "dotenv": "^16.4.7",
     "fastify": "^5.6.1",
     "livekit-server-sdk": "^2.15.0",

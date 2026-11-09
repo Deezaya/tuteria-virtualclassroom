@@ -2,6 +2,7 @@ import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { prisma } from "../../db.js";
 import { getOptionalUser, getParticipantCookieId } from "../join/service.js";
+import { readPermissions } from "../sessions/permissions.js";
 
 const paramsSchema = z.object({ sessionId: z.string().uuid() });
 
@@ -21,6 +22,7 @@ async function findCurrentParticipant(request: FastifyRequest, sessionId: string
         sessionId: true,
         classRole: true,
         status: true,
+        permissions: true,
         session: { select: { id: true, spaceId: true, endedAt: true } },
       },
     });
@@ -37,6 +39,7 @@ async function findCurrentParticipant(request: FastifyRequest, sessionId: string
       sessionId: true,
       classRole: true,
       status: true,
+      permissions: true,
       session: { select: { id: true, spaceId: true, endedAt: true } },
     },
   });
@@ -98,6 +101,9 @@ export const boardRoutes: FastifyPluginAsync = async (app) => {
         {
           sub: participant.id,
           classRole: participant.classRole,
+          editing:
+            participant.classRole !== "observer" &&
+            readPermissions(participant.permissions).editing,
           documentName,
         },
         { expiresIn: "10m" },

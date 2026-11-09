@@ -1,4 +1,4 @@
-import { RoomServiceClient } from "livekit-server-sdk";
+import { DataPacket_Kind, RoomServiceClient } from "livekit-server-sdk";
 import { prisma } from "../../db.js";
 import type { FastifyRequest } from "fastify";
 import type { ParticipantStatus } from "@prisma/client";
@@ -27,6 +27,32 @@ const liveKitRoomService = new RoomServiceClient(
   config.LIVEKIT_API_KEY,
   config.LIVEKIT_API_SECRET,
 );
+
+export async function publishWaitingListChanged(sessionId: string): Promise<void> {
+  const [hosts, roomParticipants] = await Promise.all([
+    prisma.participant.findMany({
+      where: {
+        sessionId,
+        status: "admitted",
+        classRole: { in: ["admin", "tutor"] },
+      },
+      select: { id: true },
+    }),
+    liveKitRoomService.listParticipants(sessionId),
+  ]);
+  const hostIds = new Set(hosts.map((host) => host.id));
+  const destinationIdentities = roomParticipants
+    .map((participant) => participant.identity)
+    .filter((identity) => hostIds.has(identity));
+  if (destinationIdentities.length === 0) return;
+
+  await liveKitRoomService.sendData(
+    sessionId,
+    Buffer.from(JSON.stringify({ type: "refresh" })),
+    DataPacket_Kind.RELIABLE,
+    { topic: "waiting", destinationIdentities },
+  );
+}
 
 type SessionParticipant = {
   id: string;
@@ -68,7 +94,12 @@ export async function leaveSession(
   const participant = current.participant;
   if (!participant) return { kind: "not-found" as const };
   if (participant.status === "left") {
-    return { kind: "left" as const, leftAt: participant.leftAt };
+    return {
+      kind: "left" as const,
+      leftAt: participant.leftAt,
+      participantId: participant.id,
+      wasWaiting: false,
+    };
   }
 
   const leftAt = new Date();
@@ -83,12 +114,22 @@ export async function leaveSession(
       select: { status: true, leftAt: true },
     });
     if (current?.status === "left") {
-      return { kind: "left" as const, leftAt: current.leftAt };
+      return {
+        kind: "left" as const,
+        leftAt: current.leftAt,
+        participantId: participant.id,
+        wasWaiting: false,
+      };
     }
     return { kind: "not-found" as const };
   }
 
-  return { kind: "left" as const, leftAt };
+  return {
+    kind: "left" as const,
+    leftAt,
+    participantId: participant.id,
+    wasWaiting: participant.status === "waiting",
+  };
 }
 
 export async function endCurrentSession(

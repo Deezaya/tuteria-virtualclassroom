@@ -12,7 +12,6 @@ const environmentSchema = z.object({
   ADMIN_PASSWORD: z.string().optional(),
   FRONTEND_ORIGIN: z.string().trim().url().default("http://localhost:5173"),
   FRONTEND_URL: z.string().trim().url().default("http://localhost:5173"),
-  HOCUSPOCUS_PORT: z.coerce.number().int().min(1).max(65535).default(1234),
   LIVEKIT_URL: z.string().trim().url("LIVEKIT_URL must be a valid URL"),
   LIVEKIT_API_KEY: z.string().trim().min(1, "LIVEKIT_API_KEY is required"),
   LIVEKIT_API_SECRET: z.string().trim().min(1, "LIVEKIT_API_SECRET is required"),

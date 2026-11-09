@@ -18,6 +18,7 @@ import "@excalidraw/excalidraw/index.css";
 type ClassRole = "admin" | "tutor" | "student" | "guest" | "observer";
 type BoardConnection = "Reconnecting…" | "Connected" | "Offline";
 type BoardProps = {
+  canEdit: boolean;
   classRole: ClassRole;
   displayName: string;
   sessionId: string;
@@ -28,7 +29,17 @@ type PointerUpdate = {
   button: "down" | "up";
 };
 
-const boardWsUrl = import.meta.env.VITE_BOARD_WS_URL ?? "ws://localhost:1234";
+const apiUrl = new URL(import.meta.env.VITE_API_URL ?? "http://127.0.0.1:3000");
+const boardSocketUrl = new URL(
+  import.meta.env.VITE_BOARD_WS_URL ?? "/board",
+  apiUrl,
+);
+boardSocketUrl.protocol = apiUrl.protocol === "https:" ? "wss:" : "ws:";
+boardSocketUrl.host = apiUrl.host;
+boardSocketUrl.pathname = "/board";
+boardSocketUrl.search = "";
+boardSocketUrl.hash = "";
+const boardWsUrl = boardSocketUrl.toString();
 const elementMapName = "elements";
 const localUpdateOrigin = {};
 
@@ -97,7 +108,7 @@ function readRemoteElements(elementMap: Y.Map<string>): OrderedExcalidrawElement
     .sort((a, b) => a.index.localeCompare(b.index));
 }
 
-export default function Whiteboard({ classRole, displayName, sessionId }: BoardProps) {
+export default function Whiteboard({ canEdit, classRole, displayName, sessionId }: BoardProps) {
   const [attempt, setAttempt] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -112,6 +123,8 @@ export default function Whiteboard({ classRole, displayName, sessionId }: BoardP
   const localSyncTimerRef = useRef<number | null>(null);
   const pointerTimerRef = useRef<number | null>(null);
   const latestPointerRef = useRef<PointerUpdate | null>(null);
+  const canEditRef = useRef(canEdit);
+  canEditRef.current = canEdit;
 
   useEffect(() => {
     let active = true;
@@ -132,7 +145,7 @@ export default function Whiteboard({ classRole, displayName, sessionId }: BoardP
     function flushLocalElements() {
       const currentMap = elements;
       const pendingElements = latestLocalElementsRef.current;
-      if (!currentMap || !pendingElements || classRole === "observer") return;
+      if (!currentMap || !pendingElements || !canEditRef.current) return;
 
       latestLocalElementsRef.current = null;
       const changed = pendingElements.filter(
@@ -279,7 +292,7 @@ export default function Whiteboard({ classRole, displayName, sessionId }: BoardP
   }, [attempt, classRole, displayName, sessionId]);
 
   function handleChange(elements: readonly OrderedExcalidrawElement[]) {
-    if (classRole === "observer" || !elementMapRef.current) return;
+    if (!canEditRef.current || !elementMapRef.current) return;
     const serialized = serializeElements(
       apiRef.current?.getSceneElementsIncludingDeleted() ?? elements,
     );
@@ -306,7 +319,7 @@ export default function Whiteboard({ classRole, displayName, sessionId }: BoardP
   }
 
   function handlePointerUpdate({ pointer, button }: PointerUpdate) {
-    if (classRole === "observer") return;
+    if (!canEditRef.current) return;
     const provider = providerRef.current;
     if (!provider?.awareness) return;
     latestPointerRef.current = { pointer, button };
@@ -352,7 +365,7 @@ export default function Whiteboard({ classRole, displayName, sessionId }: BoardP
             },
             welcomeScreen: false,
           }}
-          viewModeEnabled={classRole === "observer"}
+          viewModeEnabled={!canEdit}
           renderTopRightUI={() => null}
         />
       )}

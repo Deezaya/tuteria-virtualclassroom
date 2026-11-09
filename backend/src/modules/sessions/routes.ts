@@ -1,4 +1,5 @@
-import type { FastifyPluginAsync, FastifyReply } from "fastify";
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
+import { TrackSource } from "livekit-server-sdk";
 import { z } from "zod";
 import { prisma } from "../../db.js";
 import { requireRoles } from "../../plugins/auth.js";
@@ -7,10 +8,26 @@ import {
   leaveSession,
   listWaitingGuests,
   updateWaitingGuestStatus,
+  publishWaitingListChanged,
 } from "./service.js";
+import {
+  findSessionHost,
+  listSessionParticipants,
+  partialPermissionsSchema,
+  removeSessionParticipant,
+  muteSessionParticipant,
+  updateParticipantPermissions,
+  updateSessionDefaultPermissions,
+} from "./permissions.js";
+import { permissionKeys } from "./permissions.js";
+import { emitJoinStatus } from "../join/events.js";
 
 const sessionParamsSchema = z.object({ sessionId: z.string().uuid() });
 const participantParamsSchema = z.object({ id: z.string().uuid() });
+const sessionParticipantParamsSchema = z.object({
+  sessionId: z.string().uuid(),
+  participantId: z.string().uuid(),
+});
 const sessionListQuerySchema = z.object({
   search: z.string().trim().max(100).optional(),
   spaceId: z.string().uuid().optional(),
@@ -45,9 +62,35 @@ const participantResponse = {
   },
   required: ["id", "sessionId", "classRole", "status", "joinedAt"],
 };
+const permissionsSchema = {
+  type: "object",
+  properties: Object.fromEntries(permissionKeys.map((key) => [key, { type: "boolean" }])),
+  required: [...permissionKeys],
+};
+const permissionedParticipantSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string", format: "uuid" },
+    name: { type: "string" },
+    role: { type: "string", enum: ["admin", "tutor", "student", "guest"] },
+    permissions: permissionsSchema,
+  },
+  required: ["id", "name", "role", "permissions"],
+};
 
 function invalidParams(reply: FastifyReply) {
   return reply.code(400).send({ message: "Invalid id" });
+}
+
+async function requireSessionHost(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  sessionId: string,
+): Promise<boolean> {
+  const host = await findSessionHost(request, sessionId);
+  if (host) return true;
+  reply.code(403).send({ message: "Only an admitted tutor or admin can manage this session" });
+  return false;
 }
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
@@ -361,6 +404,14 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         return reply.code(404).send({ message: "Participant not found in session" });
       }
 
+      if (result.wasWaiting) {
+        void publishWaitingListChanged(params.data.sessionId).catch((error: unknown) => {
+          request.log.error(
+            { err: error, sessionId: params.data.sessionId },
+            "Could not notify session hosts about a waiting-list change.",
+          );
+        });
+      }
       return { status: "left" as const, leftAt: result.leftAt };
     },
   );
@@ -495,6 +546,13 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         return reply.code(409).send({ message: "Participant is not a waiting guest" });
       }
 
+      emitJoinStatus(result.participant.id, "admitted");
+      void publishWaitingListChanged(result.participant.sessionId).catch((error: unknown) => {
+        request.log.error(
+          { err: error, sessionId: result.participant.sessionId },
+          "Could not notify session hosts about a waiting-list change.",
+        );
+      });
       return { participant: result.participant };
     },
   );
@@ -539,7 +597,237 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         return reply.code(409).send({ message: "Participant is not a waiting guest" });
       }
 
+      emitJoinStatus(result.participant.id, "denied");
+      void publishWaitingListChanged(result.participant.sessionId).catch((error: unknown) => {
+        request.log.error(
+          { err: error, sessionId: result.participant.sessionId },
+          "Could not notify session hosts about a waiting-list change.",
+        );
+      });
       return { participant: result.participant };
+    },
+  );
+
+  app.get(
+    "/sessions/:sessionId/participants",
+    {
+      schema: {
+        tags: ["Session host controls"],
+        summary: "List admitted non-observer participants and their permissions",
+        security: [{ participantCookieAuth: [] }, { cookieAuth: [] }],
+        params: {
+          type: "object",
+          required: ["sessionId"],
+          properties: { sessionId: { type: "string", format: "uuid" } },
+        },
+        response: {
+          200: {
+            type: "object",
+            properties: {
+              participants: { type: "array", items: permissionedParticipantSchema },
+              defaultPermissions: permissionsSchema,
+            },
+            required: ["participants", "defaultPermissions"],
+          },
+          400: errorResponse,
+          403: errorResponse,
+          404: errorResponse,
+          500: errorResponse,
+        },
+      },
+    },
+    async (request, reply) => {
+      const params = sessionParamsSchema.safeParse(request.params);
+      if (!params.success) return invalidParams(reply);
+      if (!(await requireSessionHost(request, reply, params.data.sessionId))) return;
+      const result = await listSessionParticipants(params.data.sessionId);
+      if (!result) return reply.code(404).send({ message: "Session not found" });
+      return result;
+    },
+  );
+
+  app.patch(
+    "/sessions/:sessionId/participants/:participantId/permissions",
+    {
+      schema: {
+        tags: ["Session host controls"],
+        summary: "Update permissions for one admitted participant",
+        security: [{ participantCookieAuth: [] }, { cookieAuth: [] }],
+        params: {
+          type: "object",
+          required: ["sessionId", "participantId"],
+          properties: {
+            sessionId: { type: "string", format: "uuid" },
+            participantId: { type: "string", format: "uuid" },
+          },
+        },
+        body: {
+          type: "object",
+          additionalProperties: false,
+          minProperties: 1,
+          properties: Object.fromEntries(permissionKeys.map((key) => [key, { type: "boolean" }])),
+        },
+        response: {
+          200: {
+            type: "object",
+            properties: {
+              participantId: { type: "string", format: "uuid" },
+              permissions: permissionsSchema,
+            },
+            required: ["participantId", "permissions"],
+          },
+          400: errorResponse,
+          403: errorResponse,
+          404: errorResponse,
+          500: errorResponse,
+        },
+      },
+    },
+    async (request, reply) => {
+      const params = sessionParticipantParamsSchema.safeParse(request.params);
+      if (!params.success) return invalidParams(reply);
+      if (!(await requireSessionHost(request, reply, params.data.sessionId))) return;
+      const parsed = partialPermissionsSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ message: "Invalid permissions" });
+      const result = await updateParticipantPermissions(
+        params.data.sessionId,
+        params.data.participantId,
+        parsed.data,
+      );
+      if (!result) return reply.code(404).send({ message: "Participant not found" });
+      return { participantId: result.id, permissions: result.permissions };
+    },
+  );
+
+  app.patch(
+    "/sessions/:sessionId/permissions",
+    {
+      schema: {
+        tags: ["Session host controls"],
+        summary: "Update permissions for everyone and future participants",
+        security: [{ participantCookieAuth: [] }, { cookieAuth: [] }],
+        params: {
+          type: "object",
+          required: ["sessionId"],
+          properties: { sessionId: { type: "string", format: "uuid" } },
+        },
+        body: {
+          type: "object",
+          additionalProperties: false,
+          minProperties: 1,
+          properties: Object.fromEntries(permissionKeys.map((key) => [key, { type: "boolean" }])),
+        },
+        response: {
+          200: {
+            type: "object",
+            properties: { permissions: permissionsSchema },
+            required: ["permissions"],
+          },
+          400: errorResponse,
+          403: errorResponse,
+          404: errorResponse,
+          500: errorResponse,
+        },
+      },
+    },
+    async (request, reply) => {
+      const params = sessionParamsSchema.safeParse(request.params);
+      if (!params.success) return invalidParams(reply);
+      if (!(await requireSessionHost(request, reply, params.data.sessionId))) return;
+      const parsed = partialPermissionsSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ message: "Invalid permissions" });
+      const result = await updateSessionDefaultPermissions(params.data.sessionId, parsed.data);
+      if (!result) return reply.code(404).send({ message: "Session not found" });
+      return result;
+    },
+  );
+
+  for (const action of ["mute", "camera-off"] as const) {
+    app.post(
+      `/sessions/:sessionId/participants/:participantId/${action}`,
+      {
+        schema: {
+          tags: ["Session host controls"],
+          summary: action === "mute" ? "Mute a participant's microphone" : "Turn off a participant's camera",
+          security: [{ participantCookieAuth: [] }, { cookieAuth: [] }],
+          params: {
+            type: "object",
+            required: ["sessionId", "participantId"],
+            properties: {
+              sessionId: { type: "string", format: "uuid" },
+              participantId: { type: "string", format: "uuid" },
+            },
+          },
+          response: {
+            200: {
+              type: "object",
+              properties: { message: { type: "string" } },
+              required: ["message"],
+            },
+            400: errorResponse,
+            403: errorResponse,
+            404: errorResponse,
+            500: errorResponse,
+          },
+        },
+      },
+      async (request, reply) => {
+        const params = sessionParticipantParamsSchema.safeParse(request.params);
+        if (!params.success) return invalidParams(reply);
+        if (!(await requireSessionHost(request, reply, params.data.sessionId))) return;
+        const result = await muteSessionParticipant(
+          params.data.sessionId,
+          params.data.participantId,
+          action === "mute" ? TrackSource.MICROPHONE : TrackSource.CAMERA,
+        );
+        if (result === "not-found") {
+          return reply.code(404).send({ message: "Participant not found" });
+        }
+        return { message: action === "mute" ? "Microphone muted" : "Camera turned off" };
+      },
+    );
+  }
+
+  app.post(
+    "/sessions/:sessionId/participants/:participantId/remove",
+    {
+      schema: {
+        tags: ["Session host controls"],
+        summary: "Remove a participant from the session",
+        security: [{ participantCookieAuth: [] }, { cookieAuth: [] }],
+        params: {
+          type: "object",
+          required: ["sessionId", "participantId"],
+          properties: {
+            sessionId: { type: "string", format: "uuid" },
+            participantId: { type: "string", format: "uuid" },
+          },
+        },
+        response: {
+          200: {
+            type: "object",
+            properties: { message: { type: "string" } },
+            required: ["message"],
+          },
+          400: errorResponse,
+          403: errorResponse,
+          404: errorResponse,
+          500: errorResponse,
+        },
+      },
+    },
+    async (request, reply) => {
+      const params = sessionParticipantParamsSchema.safeParse(request.params);
+      if (!params.success) return invalidParams(reply);
+      if (!(await requireSessionHost(request, reply, params.data.sessionId))) return;
+      const result = await removeSessionParticipant(
+        params.data.sessionId,
+        params.data.participantId,
+      );
+      if (result === "not-found") {
+        return reply.code(404).send({ message: "Participant not found" });
+      }
+      return { message: "Participant removed" };
     },
   );
 };
