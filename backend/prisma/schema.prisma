@@ -70,6 +70,7 @@ model Session {
   defaultPermissions Json    @default("{\"editing\":true,\"microphone\":true,\"camera\":true,\"screenShare\":true,\"raiseHand\":true,\"reactions\":true,\"chat\":true,\"fileUploads\":true}")
   participants Participant[]
   chatMessages  ChatMessage[]
+  breakoutRooms BreakoutRoom[]
 
   @@index([spaceId, endedAt])
   @@index([spaceId, startedAt])
@@ -90,12 +91,27 @@ model Participant {
   admittedAt  DateTime?
   leftAt      DateTime?
   permissions Json @default("{\"editing\":true,\"microphone\":true,\"camera\":true,\"screenShare\":true,\"raiseHand\":true,\"reactions\":true,\"chat\":true,\"fileUploads\":true}")
+  breakoutRoomId String?      @db.Uuid
+  breakoutRoom   BreakoutRoom? @relation(fields: [breakoutRoomId], references: [id], onDelete: SetNull)
   chatMessages ChatMessage[]
 
   @@index([sessionId, status])
   @@index([sessionId, status, joinedAt])
   @@index([userId])
+  @@index([breakoutRoomId])
   @@map("participants")
+}
+
+model BreakoutRoom {
+  id        String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId String        @db.Uuid
+  session   Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime      @default(now())
+  members   Participant[]
+
+  @@index([sessionId])
+  @@map("breakout_rooms")
 }
 
 model Board {

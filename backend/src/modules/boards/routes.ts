@@ -5,6 +5,10 @@ import { getOptionalUser, getParticipantCookieId } from "../join/service.js";
 import { readPermissions } from "../sessions/permissions.js";
 
 const paramsSchema = z.object({ sessionId: z.string().uuid() });
+const bodySchema = z.object({
+  roomId: z.string().uuid().optional(),
+  spy: z.boolean().optional(),
+}).optional();
 
 const errorResponse = {
   type: "object",
@@ -23,6 +27,8 @@ async function findCurrentParticipant(request: FastifyRequest, sessionId: string
         classRole: true,
         status: true,
         permissions: true,
+        breakoutRoomId: true,
+        user: { select: { role: true } },
         session: { select: { id: true, spaceId: true, endedAt: true } },
       },
     });
@@ -40,6 +46,8 @@ async function findCurrentParticipant(request: FastifyRequest, sessionId: string
       classRole: true,
       status: true,
       permissions: true,
+      breakoutRoomId: true,
+      user: { select: { role: true } },
       session: { select: { id: true, spaceId: true, endedAt: true } },
     },
   });
@@ -60,6 +68,13 @@ export const boardRoutes: FastifyPluginAsync = async (app) => {
           required: ["sessionId"],
           properties: { sessionId: { type: "string", format: "uuid" } },
         },
+        body: {
+          type: "object",
+          properties: {
+            roomId: { type: "string", format: "uuid" },
+            spy: { type: "boolean" },
+          },
+        },
         response: {
           200: {
             type: "object",
@@ -73,6 +88,7 @@ export const boardRoutes: FastifyPluginAsync = async (app) => {
           400: errorResponse,
           401: errorResponse,
           403: errorResponse,
+          404: errorResponse,
           500: errorResponse,
         },
       },
@@ -81,6 +97,10 @@ export const boardRoutes: FastifyPluginAsync = async (app) => {
       const parsedParams = paramsSchema.safeParse(request.params);
       if (!parsedParams.success) {
         return reply.code(400).send({ message: "Invalid session id" });
+      }
+      const parsedBody = bodySchema.safeParse(request.body);
+      if (!parsedBody.success) {
+        return reply.code(400).send({ message: "Invalid board request" });
       }
 
       const participant = await findCurrentParticipant(request, parsedParams.data.sessionId);
@@ -96,14 +116,43 @@ export const boardRoutes: FastifyPluginAsync = async (app) => {
         return reply.code(403).send({ message: "Access not available" });
       }
 
-      const documentName = `space:${participant.session.spaceId}:main`;
+      const requestedRoomId = parsedBody.data?.roomId ?? null;
+      const spy = parsedBody.data?.spy === true;
+      const hostAccount =
+        (participant.classRole === "admin" || participant.classRole === "tutor") &&
+        (participant.user?.role === "admin" || participant.user?.role === "tutor");
+      if (
+        spy &&
+        !hostAccount &&
+        participant.classRole !== "observer"
+      ) {
+        return reply.code(403).send({ message: "Access not available" });
+      }
+      const roomId = requestedRoomId ?? participant.breakoutRoomId;
+      if (roomId && roomId !== participant.breakoutRoomId) {
+        if (!spy || (!hostAccount && participant.classRole !== "observer")) {
+          return reply.code(403).send({ message: "Access not available" });
+        }
+      }
+      if (roomId) {
+        const room = await prisma.breakoutRoom.findFirst({
+          where: { id: roomId, sessionId: parsedParams.data.sessionId },
+          select: { id: true },
+        });
+        if (!room) return reply.code(404).send({ message: "Breakout room not found" });
+      }
+      const documentName = roomId
+        ? `${parsedParams.data.sessionId}:${roomId}`
+        : `space:${participant.session.spaceId}:main`;
       const token = await reply.jwtSign(
         {
           sub: participant.id,
           classRole: participant.classRole,
           editing:
+            !spy &&
             participant.classRole !== "observer" &&
             readPermissions(participant.permissions).editing,
+          spy,
           documentName,
         },
         { expiresIn: "10m" },

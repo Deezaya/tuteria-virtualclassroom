@@ -79,9 +79,16 @@ import {
   getCurrentUser,
   getChatMessages,
   getLiveKitToken,
+  getBreakoutState,
+  applyBreakoutArrangement,
+  endBreakoutRooms,
+  getBreakoutSpyToken,
+  joinBreakoutRoom,
+  sendBreakoutAnnouncement,
   getSessionParticipants,
   getJoinStatus,
   getJoinEventsUrl,
+  getSessionEventsUrl,
   getSessionAttendance,
   getSessions,
   getSpaces,
@@ -107,6 +114,8 @@ import {
   type ClassPermissions,
   type PermissionKey,
   type SessionParticipant,
+  type BreakoutState,
+  type BreakoutRoom,
 } from "./api/client";
 import { useAuth } from "./auth/AuthProvider";
 
@@ -1328,6 +1337,35 @@ const roomTestOptions: RoomOptions = {
   videoCaptureDefaults: { resolution: camera144p.resolution },
 };
 
+function useSessionEnded(
+  sessionId: string | null,
+  joinPath: string | null,
+  onEnded?: () => void,
+) {
+  const navigate = useNavigate();
+  const onEndedRef = useRef(onEnded);
+  onEndedRef.current = onEnded;
+
+  useEffect(() => {
+    if (!sessionId) return;
+    const events = new EventSource(getSessionEventsUrl(sessionId), {
+      withCredentials: true,
+    });
+    const handleEnded = () => {
+      if (onEndedRef.current) {
+        onEndedRef.current();
+      } else {
+        navigate("/ended", { replace: true, state: { joinPath } });
+      }
+    };
+    events.addEventListener("session-ended", handleEnded);
+    return () => {
+      events.removeEventListener("session-ended", handleEnded);
+      events.close();
+    };
+  }, [joinPath, navigate, sessionId]);
+}
+
 function RoomTestPage() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -1341,12 +1379,23 @@ function RoomTestPage() {
     classRole: ClassRole;
     spaceName: string;
     permissions: ClassPermissions;
+    hidden: boolean;
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [removed, setRemoved] = useState(false);
   const [roomError, setRoomError] = useState("");
   const [attempt, setAttempt] = useState(0);
+  const intentionalDisconnectRef = useRef(false);
+
+  useSessionEnded(credentials?.sessionId ?? null, joinPath, () => {
+    intentionalDisconnectRef.current = true;
+    navigate("/ended", { replace: true, state: { joinPath } });
+  });
+
+  useEffect(() => () => {
+    intentionalDisconnectRef.current = true;
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -1396,6 +1445,7 @@ function RoomTestPage() {
         spaceId: statusResult.value.spaceId,
         classRole: statusResult.value.classRole,
         spaceName: statusResult.value.spaceName,
+        hidden: statusResult.value.classRole === "observer",
       });
       setLoading(false);
     }
@@ -1438,21 +1488,38 @@ function RoomTestPage() {
   return (
     <main className="room-test-page classroom-room">
       <LiveKitRoom
-        audio={mediaPreferences.microphoneEnabled
+        audio={mediaPreferences.microphoneEnabled &&
+        !credentials.hidden &&
+        credentials.classRole !== "observer"
           ? { deviceId: mediaPreferences.microphoneDeviceId || undefined }
           : false}
-        onError={() => setRoomError("We couldn’t connect to the class. Check your connection and try again.")}
+        onConnected={() => {
+          intentionalDisconnectRef.current = false;
+          setRoomError("");
+        }}
+        onError={() => {
+          if (!intentionalDisconnectRef.current) {
+            setRoomError("We couldn’t connect to the class. Check your connection and try again.");
+          }
+        }}
         onDisconnected={(reason) => {
           if (reason === DisconnectReason.ROOM_DELETED) {
             navigate("/ended", { replace: true, state: { joinPath } });
           } else if (String(reason).toLowerCase() === "participant_removed") {
             setRemoved(true);
+          } else if (
+            !intentionalDisconnectRef.current &&
+            reason !== DisconnectReason.CLIENT_INITIATED
+          ) {
+            setRoomError("We couldn’t connect to the class. Check your connection and try again.");
           }
         }}
         options={roomTestOptions}
         serverUrl={credentials.url}
         token={credentials.token}
-        video={mediaPreferences.cameraEnabled
+        video={mediaPreferences.cameraEnabled &&
+        !credentials.hidden &&
+        credentials.classRole !== "observer"
           ? {
               deviceId: mediaPreferences.cameraDeviceId || undefined,
               resolution: camera144p.resolution,
@@ -1465,11 +1532,26 @@ function RoomTestPage() {
           onError={setRoomError}
           classRole={credentials.classRole}
           initialPermissions={credentials.permissions}
-          roomName={credentials.spaceName}
           onLeft={() => {
             navigate("/left", { replace: true, state: { joinPath } });
           }}
           onEnded={() => navigate("/ended", { replace: true, state: { joinPath } })}
+          onReconnect={(connection) => {
+            setCredentials((current) =>
+              current
+                ? {
+                    ...current,
+                    token: connection.token,
+                    url: connection.url,
+                    permissions: connection.permissions ?? current.permissions,
+                    hidden: connection.hidden ?? false,
+                  }
+                : current,
+            );
+          }}
+          onIntentionalDisconnect={() => {
+            intentionalDisconnectRef.current = true;
+          }}
           speakerDeviceId={mediaPreferences.speakerDeviceId}
           sessionId={credentials.sessionId}
           spaceId={credentials.spaceId}
@@ -1485,10 +1567,11 @@ function RoomTestControls({
   onLeft,
   onEnded,
   onError,
+  onReconnect,
+  onIntentionalDisconnect,
   error,
   speakerDeviceId,
   classRole,
-  roomName,
   initialPermissions,
 }: {
   sessionId: string;
@@ -1496,10 +1579,16 @@ function RoomTestControls({
   onLeft: () => void;
   onEnded: () => void;
   onError: (message: string) => void;
+  onReconnect: (connection: {
+    token: string;
+    url: string;
+    permissions?: ClassPermissions;
+    hidden?: boolean;
+  }) => void;
+  onIntentionalDisconnect: () => void;
   error: string;
   speakerDeviceId: string;
   classRole: ClassRole;
-  roomName: string;
   initialPermissions: ClassPermissions;
 }) {
   const connectionState = useConnectionState();
@@ -1570,6 +1659,40 @@ function RoomTestControls({
   const [observerLinkLoading, setObserverLinkLoading] = useState(false);
   const [observerLinkError, setObserverLinkError] = useState("");
   const [myPermissions, setMyPermissions] = useState<ClassPermissions>(initialPermissions);
+  const [breakoutState, setBreakoutState] = useState<BreakoutState>({
+    rooms: [],
+    unassigned: [],
+    ownRoom: null,
+  });
+  const [breakoutMenuOpen, setBreakoutMenuOpen] = useState(false);
+  const [breakoutManagerOpen, setBreakoutManagerOpen] = useState(false);
+  const [draftRooms, setDraftRooms] = useState<
+    Array<{ id?: string; name: string; participantIds: string[] }>
+  >([]);
+  const [breakoutPanelOpen, setBreakoutPanelOpen] = useState(false);
+  const [boardRoomId, setBoardRoomId] = useState<string | null>(null);
+  const [spyRoomId, setSpyRoomId] = useState<string | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const connectionTargetRef = useRef<{ roomId: string | null; spying: boolean }>({
+    roomId: null,
+    spying: false,
+  });
+  const initialConnectionTargetSetRef = useRef(false);
+  const [arrangementSaving, setArrangementSaving] = useState(false);
+  const [breakoutError, setBreakoutError] = useState("");
+  const [roomMenuId, setRoomMenuId] = useState<string | null>(null);
+  const [renamingRoomId, setRenamingRoomId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [announcementOpen, setAnnouncementOpen] = useState(false);
+  const [announcementDraft, setAnnouncementDraft] = useState("");
+  const [announcementSending, setAnnouncementSending] = useState(false);
+  const [announcementError, setAnnouncementError] = useState("");
+  const [announcementBanner, setAnnouncementBanner] = useState<{
+    tutorName: string;
+    text: string;
+  } | null>(null);
+  const breakoutMenuRef = useRef<HTMLDivElement>(null);
+  const announcementTimerRef = useRef<number | null>(null);
   const [permissionNotice, setPermissionNotice] = useState("");
   const observerCopiedTimerRef = useRef<number | null>(null);
   const permissionNoticeTimerRef = useRef<number | null>(null);
@@ -1577,21 +1700,283 @@ function RoomTestControls({
   const personMenuRef = useRef<HTMLDivElement>(null);
   const isHostClassRole = classRole === "admin" || classRole === "tutor";
   const canPublish = classRole !== "observer";
-  const canEditBoard = classRole !== "observer" && myPermissions.editing;
+  const canEditBoard = !spyRoomId && classRole !== "observer" && myPermissions.editing;
   const canUseMicrophone = canPublish && myPermissions.microphone;
   const canUseCamera = canPublish && myPermissions.camera;
   const canUseScreenShare = canPublish && myPermissions.screenShare;
   const participantSignature = participants.map((participant) => participant.identity).sort().join("|");
   const visibleParticipants = participants.filter((participant) =>
     readParticipantRole(participant) !== "observer" &&
-    !(participant.identity === localParticipant.identity && classRole === "observer"),
+    !(participant.identity === localParticipant.identity &&
+      (classRole === "observer" || spyRoomId !== null)),
   );
+  const currentBreakoutRoom =
+    (spyRoomId
+      ? breakoutState.rooms.find((room) => room.id === spyRoomId)
+      : breakoutState.rooms.find((room) => room.id === boardRoomId)) ?? null;
+  const isViewingSpyRoom = spyRoomId !== null;
   const visibleWaitingGuests = waitingGuests.filter(
     (guest) => !dismissedGuestIds.has(guest.id),
   );
+  const knownBreakoutPeople = [
+    ...breakoutState.unassigned,
+    ...breakoutState.rooms.flatMap((breakoutRoom) => breakoutRoom.members),
+  ];
+  const assignedDraftIds = new Set(draftRooms.flatMap((draftRoom) => draftRoom.participantIds));
+  const draftUnassigned = knownBreakoutPeople.filter((person) => !assignedDraftIds.has(person.id));
   const currentGuest = visibleWaitingGuests[0];
   chatOpenRef.current = chatOpen;
   localParticipantIdRef.current = localParticipant.identity;
+
+  async function reconnectToRoom(
+    attemptId: number,
+    connection: Promise<{
+      token: string;
+      url: string;
+      permissions?: ClassPermissions;
+      hidden?: boolean;
+    }>,
+    roomId: string | null,
+    spying: boolean,
+    hidden: boolean,
+  ): Promise<boolean> {
+    const result = await connection;
+    if (attemptId !== reconnectAttemptRef.current) return false;
+    if (
+      connectionTargetRef.current.roomId === roomId &&
+      connectionTargetRef.current.spying === spying
+    ) {
+      initialConnectionTargetSetRef.current = true;
+      return true;
+    }
+
+    onIntentionalDisconnect();
+    try {
+      await room.disconnect();
+    } catch (cause) {
+      onIntentionalDisconnect();
+      throw cause;
+    }
+    if (attemptId !== reconnectAttemptRef.current) return false;
+
+    connectionTargetRef.current = { roomId, spying };
+    initialConnectionTargetSetRef.current = true;
+    onReconnect({ ...result, hidden });
+    return true;
+  }
+
+  async function refreshBreakoutAndReconnect() {
+    const attemptId = ++reconnectAttemptRef.current;
+    try {
+      const state = await getBreakoutState(sessionId);
+      if (attemptId !== reconnectAttemptRef.current) return;
+      setBreakoutState(state);
+      let nextSpyRoomId = spyRoomId;
+      let nextBoardRoomId = state.ownRoom?.id ?? null;
+      let token: Promise<{
+        token: string;
+        url: string;
+        permissions?: ClassPermissions;
+        hidden?: boolean;
+      }>;
+      if (spyRoomId && state.rooms.some((breakoutRoom) => breakoutRoom.id === spyRoomId)) {
+        token = getBreakoutSpyToken(sessionId, spyRoomId);
+        nextSpyRoomId = spyRoomId;
+        nextBoardRoomId = spyRoomId;
+      } else {
+        if (spyRoomId) {
+          setBreakoutPanelOpen(state.rooms.length > 0);
+        } else if (state.rooms.length === 0) {
+          setBreakoutPanelOpen(false);
+        }
+        token = getLiveKitToken();
+        nextSpyRoomId = null;
+      }
+      const targetRoomId = nextSpyRoomId ?? state.ownRoom?.id ?? null;
+      const connection = await token;
+      if (attemptId !== reconnectAttemptRef.current) return;
+      setSpyRoomId(nextSpyRoomId);
+      setBoardRoomId(nextBoardRoomId);
+      if (state.rooms.length === 0) setBreakoutPanelOpen(false);
+      await reconnectToRoom(
+        attemptId,
+        Promise.resolve(connection),
+        targetRoomId,
+        nextSpyRoomId !== null,
+        nextSpyRoomId !== null || classRole === "observer",
+      );
+    } catch (cause) {
+      if (attemptId === reconnectAttemptRef.current) {
+        onError(cause instanceof Error ? cause.message : "Could not reconnect to your room.");
+      }
+    }
+  }
+
+  function showAnnouncement(tutorName: string, text: string) {
+    if (classRole === "observer" && !spyRoomId) return;
+    setAnnouncementBanner({ tutorName, text });
+    if (announcementTimerRef.current !== null) {
+      window.clearTimeout(announcementTimerRef.current);
+    }
+    announcementTimerRef.current = window.setTimeout(() => {
+      setAnnouncementBanner(null);
+      announcementTimerRef.current = null;
+    }, 15_000);
+  }
+
+  function openBreakoutManager() {
+    setDraftRooms(
+      breakoutState.rooms.map((breakoutRoom) => ({
+        id: breakoutRoom.id,
+        name: breakoutRoom.name,
+        participantIds: breakoutRoom.members.map((person) => person.id),
+      })),
+    );
+    setBreakoutError("");
+    setBreakoutMenuOpen(false);
+    setBreakoutManagerOpen(true);
+  }
+
+  function moveDraftPerson(participantId: string, roomIndex: number | null) {
+    setDraftRooms((current) =>
+      current.map((draftRoom, index) => ({
+        ...draftRoom,
+        participantIds: index === roomIndex
+          ? [...draftRoom.participantIds.filter((id) => id !== participantId), participantId]
+          : draftRoom.participantIds.filter((id) => id !== participantId),
+      })),
+    );
+  }
+
+  async function applyArrangement() {
+    if (arrangementSaving) return;
+    setArrangementSaving(true);
+    setBreakoutError("");
+    try {
+      await applyBreakoutArrangement(sessionId, { rooms: draftRooms });
+      setBreakoutManagerOpen(false);
+      const state = await getBreakoutState(sessionId);
+      setBreakoutState(state);
+      setBoardRoomId(state.ownRoom?.id ?? null);
+      if (state.rooms.length === 0) setBreakoutPanelOpen(false);
+      if (spyRoomId && !state.rooms.some((breakoutRoom) => breakoutRoom.id === spyRoomId)) {
+        await refreshBreakoutAndReconnect();
+      }
+    } catch (cause) {
+      setBreakoutError(cause instanceof Error ? cause.message : "Could not apply breakout rooms.");
+    } finally {
+      setArrangementSaving(false);
+    }
+  }
+
+  function saveRoomRename(roomIndex: number) {
+    const name = renameDraft.trim();
+    if (!name || name.length > 40) return;
+    setDraftRooms((current) =>
+      current.map((draftRoom, index) => index === roomIndex ? { ...draftRoom, name } : draftRoom),
+    );
+    setRenamingRoomId(null);
+  }
+
+  async function watchBreakoutRoom(breakoutRoom: BreakoutRoom) {
+    const attemptId = ++reconnectAttemptRef.current;
+    try {
+      const token = getBreakoutSpyToken(sessionId, breakoutRoom.id);
+      setSpyRoomId(breakoutRoom.id);
+      setBoardRoomId(breakoutRoom.id);
+      setChatOpen(false);
+      setBreakoutPanelOpen(false);
+      await reconnectToRoom(
+        attemptId,
+        token,
+        breakoutRoom.id,
+        true,
+        true,
+      );
+    } catch (cause) {
+      if (attemptId === reconnectAttemptRef.current) {
+        setBreakoutError(cause instanceof Error ? cause.message : "Could not open spy mode.");
+      }
+    }
+  }
+
+  async function enterBreakoutRoom(roomId: string | null) {
+    const attemptId = ++reconnectAttemptRef.current;
+    try {
+      const connection = joinBreakoutRoom(sessionId, roomId);
+      const breakoutRoom = breakoutState.rooms.find((room) => room.id === roomId);
+      setSpyRoomId(null);
+      setBoardRoomId(roomId);
+      setBreakoutState((current) => ({
+        ...current,
+        ownRoom: breakoutRoom ? { id: breakoutRoom.id, name: breakoutRoom.name } : null,
+      }));
+      setBreakoutPanelOpen(false);
+      setBreakoutMenuOpen(false);
+      await reconnectToRoom(attemptId, connection, roomId, false, false);
+    } catch (cause) {
+      if (attemptId === reconnectAttemptRef.current) {
+        setBreakoutError(cause instanceof Error ? cause.message : "Could not join that room.");
+      }
+    }
+  }
+
+  async function returnToAllRooms() {
+    if (isHostClassRole) {
+      await enterBreakoutRoom(null);
+      return;
+    }
+    const attemptId = ++reconnectAttemptRef.current;
+    try {
+      const connection = getLiveKitToken();
+      setSpyRoomId(null);
+      setBoardRoomId(null);
+      setBreakoutPanelOpen(breakoutState.rooms.length > 0);
+      await reconnectToRoom(attemptId, connection, null, false, classRole === "observer");
+    } catch (cause) {
+      if (attemptId === reconnectAttemptRef.current) {
+        setBreakoutError(cause instanceof Error ? cause.message : "Could not return to the room list.");
+      }
+    }
+  }
+
+  async function endAllBreakoutRooms() {
+    try {
+      await endBreakoutRooms(sessionId);
+      setBreakoutMenuOpen(false);
+      const state = await getBreakoutState(sessionId);
+      setBreakoutState(state);
+      if (state.rooms.length === 0) {
+        setBreakoutPanelOpen(false);
+        if (spyRoomId) await refreshBreakoutAndReconnect();
+      }
+    } catch (cause) {
+      setBreakoutError(cause instanceof Error ? cause.message : "Could not end breakout rooms.");
+    }
+  }
+
+  async function submitAnnouncement(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const text = announcementDraft.trim();
+    if (!text || text.length > 300 || announcementSending) return;
+    setAnnouncementSending(true);
+    setAnnouncementError("");
+    try {
+      await sendBreakoutAnnouncement(sessionId, text);
+      setAnnouncementDraft("");
+      setAnnouncementOpen(false);
+    } catch (cause) {
+      setAnnouncementError(cause instanceof Error ? cause.message : "Could not send announcement.");
+    } finally {
+      setAnnouncementSending(false);
+    }
+  }
+
+  useEffect(() => () => {
+    if (announcementTimerRef.current !== null) {
+      window.clearTimeout(announcementTimerRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -1622,6 +2007,51 @@ function RoomTestControls({
   }, [chatHistoryAttempt, sessionId]);
 
   useEffect(() => {
+    let active = true;
+    const refresh = () => {
+      void getBreakoutState(sessionId)
+        .then((state) => {
+          if (!active) return;
+          setBreakoutState(state);
+          if (!initialConnectionTargetSetRef.current) {
+            connectionTargetRef.current = {
+              roomId: state.ownRoom?.id ?? null,
+              spying: false,
+            };
+            initialConnectionTargetSetRef.current = true;
+          }
+          if (!spyRoomId) setBoardRoomId(state.ownRoom?.id ?? null);
+        })
+        .catch(() => {
+          if (active) setBreakoutError("Could not load breakout rooms.");
+        });
+    };
+    room.on(RoomEvent.ParticipantConnected, refresh);
+    room.on(RoomEvent.ParticipantDisconnected, refresh);
+    refresh();
+    return () => {
+      active = false;
+      room.off(RoomEvent.ParticipantConnected, refresh);
+      room.off(RoomEvent.ParticipantDisconnected, refresh);
+    };
+  }, [room, sessionId, spyRoomId]);
+
+  useEffect(() => {
+    if (breakoutState.rooms.length === 0 && breakoutPanelOpen) setBreakoutPanelOpen(false);
+  }, [breakoutPanelOpen, breakoutState.rooms.length]);
+
+  useEffect(() => {
+    if (!breakoutMenuOpen) return;
+    function closeBreakoutMenu(event: PointerEvent) {
+      if (!breakoutMenuRef.current?.contains(event.target as Node)) {
+        setBreakoutMenuOpen(false);
+      }
+    }
+    document.addEventListener("pointerdown", closeBreakoutMenu);
+    return () => document.removeEventListener("pointerdown", closeBreakoutMenu);
+  }, [breakoutMenuOpen]);
+
+  useEffect(() => {
     const handleData = (
       payload: Uint8Array,
       _participant: LiveKitParticipant | undefined,
@@ -1639,6 +2069,26 @@ function RoomTestControls({
             setWaitingError("We couldn’t check guest requests. Please try again.");
           });
         return;
+      }
+      if (topic === "breakouts") {
+          try {
+            const parsed: unknown = JSON.parse(new TextDecoder().decode(payload));
+            if (typeof parsed !== "object" || parsed === null || !("type" in parsed)) return;
+            if (
+              parsed.type === "announcement" &&
+              "tutorName" in parsed &&
+              "text" in parsed &&
+              typeof parsed.tutorName === "string" &&
+              typeof parsed.text === "string"
+            ) {
+              showAnnouncement(parsed.tutorName, parsed.text);
+            } else if (parsed.type === "state-changed") {
+              void refreshBreakoutAndReconnect();
+            }
+          } catch {
+            onError("A live breakout room update could not be read.");
+          }
+          return;
       }
       if (topic !== "chat" && topic !== "permissions" && topic !== "classroom-control") return;
       try {
@@ -1723,7 +2173,7 @@ function RoomTestControls({
     return () => {
       room.off(RoomEvent.DataReceived, handleData);
     };
-  }, [isHostClassRole, room, sessionId]);
+  }, [classRole, isHostClassRole, onError, room, sessionId, spyRoomId]);
 
   useEffect(() => {
     const handlePermissionsChanged = (
@@ -2340,10 +2790,12 @@ function RoomTestControls({
   }
 
   async function leave() {
+    reconnectAttemptRef.current += 1;
     setLeaving(true);
     setMenuOpen(false);
     try {
       await leaveSession(sessionId);
+      onIntentionalDisconnect();
       await room.disconnect();
       onLeft();
     } catch {
@@ -2369,9 +2821,94 @@ function RoomTestControls({
     <section className="classroom-page">
       <header className="classroom-topbar">
         <Logo />
-        <button className="classroom-room-tab active" type="button">
-          Main room <ChevronDown aria-hidden="true" size={13} />
-        </button>
+        {isHostClassRole ? (
+          <div className="classroom-breakout-menu" ref={breakoutMenuRef}>
+            <button
+              aria-expanded={breakoutMenuOpen}
+              aria-haspopup="menu"
+              className={`classroom-room-tab${boardRoomId === null && !isViewingSpyRoom ? " active" : ""}`}
+              onClick={() => setBreakoutMenuOpen((open) => !open)}
+              type="button"
+            >
+              Main room <ChevronDown aria-hidden="true" size={13} />
+            </button>
+            {breakoutMenuOpen && (
+              <div aria-label="Main room menu" className="classroom-breakout-dropdown" role="menu">
+                {boardRoomId && !isViewingSpyRoom && (
+                  <button
+                    className="classroom-breakout-back"
+                    onClick={() => void enterBreakoutRoom(null)}
+                    role="menuitem"
+                    type="button"
+                  >
+                    ‹ Back to main room
+                  </button>
+                )}
+                <button
+                  className="classroom-breakout-manager-link"
+                  onClick={openBreakoutManager}
+                  role="menuitem"
+                  type="button"
+                >
+                  <UsersRound aria-hidden="true" size={15} />
+                  Breakout manager
+                </button>
+                <span className="classroom-breakout-list-title">BREAKOUT ROOMS</span>
+                {breakoutState.rooms.length ? (
+                  breakoutState.rooms.map((breakoutRoom) => (
+                    <button
+                      className="classroom-breakout-room-link"
+                      key={breakoutRoom.id}
+                      onClick={() => void enterBreakoutRoom(breakoutRoom.id)}
+                      role="menuitem"
+                      type="button"
+                    >
+                      <span>{breakoutRoom.name}{boardRoomId === breakoutRoom.id && !isViewingSpyRoom && <em>You're here</em>}</span>
+                      <small>{breakoutRoom.memberCount} people</small>
+                    </button>
+                  ))
+                ) : (
+                  <p className="classroom-breakout-empty">
+                    No breakout rooms yet. Create them in the Breakout manager.
+                  </p>
+                )}
+                <button
+                  className="classroom-breakout-announce"
+                  onClick={() => {
+                    setBreakoutMenuOpen(false);
+                    setAnnouncementError("");
+                    setAnnouncementOpen(true);
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  Send announcement
+                </button>
+                {breakoutState.rooms.length > 0 && (
+                  <button
+                    className="classroom-breakout-end"
+                    onClick={() => void endAllBreakoutRooms()}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <strong>End breakout rooms</strong>
+                    <small>Everyone returns to the main room. Boards are saved.</small>
+                  </button>
+                )}
+                {breakoutError && <p className="classroom-breakout-error" role="alert">{breakoutError}</p>}
+              </div>
+            )}
+          </div>
+        ) : (
+          <button className={`classroom-room-tab${boardRoomId === null ? " active" : ""}`} type="button">
+            Main room
+          </button>
+        )}
+        {currentBreakoutRoom && (
+          <button className="classroom-room-tab active" type="button">
+            {currentBreakoutRoom.name} board
+          </button>
+        )}
         <button className="classroom-topbar-icon" disabled title="Coming soon" type="button">
           <Plus aria-hidden="true" size={18} />
         </button>
@@ -2532,7 +3069,257 @@ function RoomTestControls({
         </div>
       </header>
 
-      <div className={`classroom-workspace layout-${layout}${isHostClassRole ? " has-layout-controls" : ""}`}>
+      {announcementBanner && (
+        <div aria-live="polite" className="classroom-announcement-banner" role="status">
+          <div>
+            <strong>Announcement from {announcementBanner.tutorName}</strong>
+            <span>{announcementBanner.text}</span>
+          </div>
+          <button
+            aria-label="Close announcement"
+            onClick={() => {
+              setAnnouncementBanner(null);
+              if (announcementTimerRef.current !== null) {
+                window.clearTimeout(announcementTimerRef.current);
+                announcementTimerRef.current = null;
+              }
+            }}
+            type="button"
+          >
+            <X aria-hidden="true" size={17} />
+          </button>
+        </div>
+      )}
+
+      {breakoutManagerOpen && isHostClassRole && (
+        <div
+          className="dialog-backdrop classroom-breakout-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !arrangementSaving) {
+              setBreakoutManagerOpen(false);
+            }
+          }}
+        >
+          <section
+            aria-labelledby="breakout-manager-title"
+            aria-modal="true"
+            className="classroom-breakout-manager"
+            role="dialog"
+          >
+            <header className="classroom-breakout-manager-heading">
+              <div>
+                <span>BREAKOUT MANAGER</span>
+                <h2 id="breakout-manager-title">Arrange breakout rooms</h2>
+                <p>Changes happen together when you apply them.</p>
+              </div>
+              <button
+                aria-label="Close breakout manager"
+                disabled={arrangementSaving}
+                onClick={() => setBreakoutManagerOpen(false)}
+                type="button"
+              >
+                <X aria-hidden="true" size={18} />
+              </button>
+            </header>
+            <div className="classroom-breakout-manager-content">
+              <section
+                aria-label="Unassigned people"
+                className="classroom-breakout-people"
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const personId = event.dataTransfer.getData("text/plain");
+                  if (personId) moveDraftPerson(personId, null);
+                }}
+              >
+                <strong>People</strong>
+                {draftUnassigned.length === 0 ? (
+                  <p className="classroom-breakout-no-people">Everyone is in a room</p>
+                ) : (
+                  draftUnassigned.map((person, index) => (
+                    <div
+                      className="classroom-breakout-person"
+                      draggable
+                      key={person.id}
+                      onDragStart={(event) => event.dataTransfer.setData("text/plain", person.id)}
+                    >
+                      <span className={`classroom-person-avatar avatar-color-${index % 4}`}>{getInitials(person.name)}</span>
+                      <span>{person.name}</span>
+                    </div>
+                  ))
+                )}
+              </section>
+              <div className="classroom-breakout-room-grid">
+                {draftRooms.map((draftRoom, index) => (
+                  <article
+                    className="classroom-breakout-room-card"
+                    key={draftRoom.id ?? `new-room-${index}`}
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      const personId = event.dataTransfer.getData("text/plain");
+                      if (personId) moveDraftPerson(personId, index);
+                    }}
+                  >
+                    <header>
+                      {renamingRoomId === String(index) ? (
+                        <form
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            saveRoomRename(index);
+                          }}
+                        >
+                          <input
+                            aria-label="Room name"
+                            maxLength={40}
+                            onChange={(event) => setRenameDraft(event.target.value)}
+                            value={renameDraft}
+                          />
+                          <button type="submit">Save</button>
+                          <button onClick={() => setRenamingRoomId(null)} type="button">Cancel</button>
+                        </form>
+                      ) : (
+                        <strong>{draftRoom.name}</strong>
+                      )}
+                      <div className="classroom-breakout-room-menu-wrap">
+                        <button
+                          aria-label={`Options for ${draftRoom.name}`}
+                          aria-expanded={roomMenuId === String(index)}
+                          onClick={() => setRoomMenuId((current) => current === String(index) ? null : String(index))}
+                          type="button"
+                        >
+                          <MoreVertical aria-hidden="true" size={16} />
+                        </button>
+                        {roomMenuId === String(index) && (
+                          <div className="classroom-breakout-room-menu" role="menu">
+                            <button
+                              onClick={() => {
+                                setRenamingRoomId(String(index));
+                                setRenameDraft(draftRoom.name);
+                                setRoomMenuId(null);
+                              }}
+                              role="menuitem"
+                              type="button"
+                            >
+                              Rename
+                            </button>
+                            <button
+                              className="delete"
+                              onClick={() => {
+                                setDraftRooms((current) => current.filter((_, roomIndex) => roomIndex !== index));
+                                setRoomMenuId(null);
+                                setRenamingRoomId(null);
+                              }}
+                              role="menuitem"
+                              type="button"
+                            >
+                              Delete room
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </header>
+                    <div className="classroom-breakout-dropzone">
+                      {draftRoom.participantIds.map((id, memberIndex) => {
+                        const person = knownBreakoutPeople.find((item) => item.id === id);
+                        if (!person) return null;
+                        return (
+                          <div
+                            className="classroom-breakout-person"
+                            draggable
+                            key={person.id}
+                            onDragStart={(event) => event.dataTransfer.setData("text/plain", person.id)}
+                          >
+                            <span className={`classroom-person-avatar avatar-color-${memberIndex % 4}`}>{getInitials(person.name)}</span>
+                            <span>{person.name}</span>
+                          </div>
+                        );
+                      })}
+                      {draftRoom.participantIds.length === 0 && <span>Drag people here</span>}
+                    </div>
+                  </article>
+                ))}
+                <button
+                  className="classroom-breakout-new"
+                  disabled={draftRooms.length >= 10}
+                  onClick={() => {
+                    setDraftRooms((current) => [
+                      ...current,
+                      { name: `Breakout ${current.length + 1}`, participantIds: [] },
+                    ]);
+                  }}
+                  type="button"
+                >
+                  <Plus aria-hidden="true" size={17} />
+                  New breakout
+                </button>
+              </div>
+            </div>
+            {breakoutError && <p className="classroom-breakout-error" role="alert">{breakoutError}</p>}
+            <footer className="classroom-breakout-manager-actions">
+              <button
+                className="classroom-breakout-cancel"
+                disabled={arrangementSaving}
+                onClick={() => setBreakoutManagerOpen(false)}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="classroom-breakout-apply"
+                disabled={arrangementSaving}
+                onClick={() => void applyArrangement()}
+                type="button"
+              >
+                {arrangementSaving ? "Applying…" : "Apply changes"}
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
+
+      {announcementOpen && isHostClassRole && (
+        <div className="dialog-backdrop">
+          <section
+            aria-labelledby="announcement-title"
+            aria-modal="true"
+            className="classroom-announcement-dialog"
+            role="dialog"
+          >
+            <h2 id="announcement-title">Send announcement</h2>
+            <form onSubmit={(event) => void submitAnnouncement(event)}>
+              <textarea
+                aria-label="Announcement text"
+                maxLength={300}
+                onChange={(event) => setAnnouncementDraft(event.target.value)}
+                placeholder="Write an announcement for everyone…"
+                value={announcementDraft}
+              />
+              <span className="classroom-announcement-counter">{announcementDraft.length}/300</span>
+              {announcementError && <p className="classroom-breakout-error" role="alert">{announcementError}</p>}
+              <div className="classroom-breakout-manager-actions">
+                <button
+                  className="classroom-breakout-cancel"
+                  disabled={announcementSending}
+                  onClick={() => setAnnouncementOpen(false)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="classroom-breakout-apply"
+                  disabled={!announcementDraft.trim() || announcementSending}
+                  type="submit"
+                >
+                  {announcementSending ? "Sending…" : "Send"}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      <div className={`classroom-workspace layout-${layout}${isHostClassRole || classRole === "observer" ? " has-layout-controls" : ""}${chatOpen ? " chat-open" : ""}`}>
         <main className="classroom-board">
           <div className="classroom-whiteboard">
             <Suspense fallback={<div className="classroom-whiteboard-loading">Loading board…</div>}>
@@ -2540,7 +3327,9 @@ function RoomTestControls({
                 canEdit={canEditBoard}
                 classRole={classRole}
                 displayName={localParticipant.name || localParticipant.identity}
+                roomId={boardRoomId}
                 sessionId={sessionId}
+                spyMode={isViewingSpyRoom}
               />
             </Suspense>
           </div>
@@ -2584,135 +3373,96 @@ function RoomTestControls({
         </main>
 
         <aside className={`classroom-side-panel${chatOpen ? " chat-open" : ""}`}>
-          {chatOpen ? (
-            <section aria-label="Class chat" className="classroom-chat-panel">
-              <header>
+          {isViewingSpyRoom ? (
+            <section aria-label={`Spy mode: ${currentBreakoutRoom?.name ?? "breakout room"}`} className="classroom-spy-view">
+              <header className="classroom-spy-heading">
                 <div>
-                  <strong>Chat</strong>
-                  <span>Messages are saved in this space</span>
+                  <strong>Spy mode · {currentBreakoutRoom?.name ?? "Breakout room"}</strong>
+                  <span>They can't see or hear you</span>
                 </div>
-                <button aria-label="Close chat panel" onClick={() => setChatOpen(false)} type="button">
-                  <X aria-hidden="true" size={17} />
+              </header>
+              <button className="classroom-spy-back" onClick={() => void returnToAllRooms()} type="button">
+                ‹ All rooms
+              </button>
+              <div className="classroom-spy-tiles">
+                {currentBreakoutRoom?.members.map((person, index) => (
+                  <article className="classroom-spy-tile" key={person.id}>
+                    <span className={`classroom-tile-avatar avatar-color-${index % 4}`}>{getInitials(person.name)}</span>
+                    <strong>{person.name}</strong>
+                  </article>
+                ))}
+                {currentBreakoutRoom?.members.length === 0 && (
+                  <p className="classroom-spy-empty">No people are in this room yet.</p>
+                )}
+              </div>
+              {isHostClassRole && (
+                <button
+                  className="classroom-spy-join"
+                  onClick={() => void enterBreakoutRoom(spyRoomId)}
+                  type="button"
+                >
+                  Join this room
+                </button>
+              )}
+            </section>
+          ) : breakoutPanelOpen ? (
+            <section aria-label="Spy mode" className="classroom-spy-panel">
+              <header className="classroom-spy-heading">
+                <div>
+                  <strong>Spy mode</strong>
+                  <span>Watch breakout rooms without entering</span>
+                </div>
+                <button
+                  aria-label="Close spy mode"
+                  onClick={() => setBreakoutPanelOpen(false)}
+                  type="button"
+                >
+                  <X aria-hidden="true" size={16} />
                 </button>
               </header>
-              <div
-                aria-live="polite"
-                aria-relevant="additions"
-                className="classroom-chat-messages"
-                onScroll={(event) => {
-                  const element = event.currentTarget;
-                  chatAtBottomRef.current =
-                    element.scrollHeight - element.scrollTop - element.clientHeight < 48;
-                }}
-                ref={chatListRef}
-                role="log"
-              >
-                {chatHistoryLoading && chatMessages.length === 0 && (
-                  <p className="classroom-chat-info">Loading messages…</p>
-                )}
-                {chatHistoryError && (
-                  <p className="classroom-chat-info" role="alert">
-                    {chatHistoryError}{" "}
-                    <button
-                      onClick={() => setChatHistoryAttempt((attempt) => attempt + 1)}
-                      type="button"
-                    >
-                      Retry
-                    </button>
-                  </p>
-                )}
-                {!chatHistoryLoading && !chatHistoryError && chatMessages.length === 0 && (
-                  <p className="classroom-chat-info">No messages yet. Start the conversation.</p>
-                )}
-                {chatMessages.map(({ message, delivery, localKey }) => {
-                  const ownMessage = message.participantId === localParticipant.identity;
-                  return (
-                    <article
-                      className={`classroom-chat-message${ownMessage ? " own" : ""}`}
-                      key={message.id}
-                    >
-                      <div className="classroom-chat-message-meta">
-                        <strong>
-                          {message.senderName || "Observer"}{ownMessage ? " (you)" : ""}
-                        </strong>
-                        <span className={`classroom-chat-role role-${message.senderRole}`}>
-                          {message.senderRole === "observer"
-                            ? "Observer"
-                            : formatClassRole(message.senderRole)}
-                        </span>
-                        <time dateTime={message.createdAt}>
-                          {new Date(message.createdAt).toLocaleTimeString([], {
-                            hour: "numeric",
-                            minute: "2-digit",
-                          })}
-                        </time>
-                      </div>
-                      <p>{message.body}</p>
-                      {delivery === "sending" && (
-                        <span className="classroom-chat-delivery">Sending…</span>
+              <div className="classroom-spy-room-list">
+                {breakoutState.rooms.map((breakoutRoom) => (
+                  <article className="classroom-spy-room-card" key={breakoutRoom.id}>
+                    <div className="classroom-spy-room-title">
+                      <strong>{breakoutRoom.name}</strong>
+                      <span>{breakoutRoom.memberCount} people</span>
+                    </div>
+                    <div aria-label={`${breakoutRoom.name} members`} className="classroom-spy-avatars">
+                      {breakoutRoom.members.slice(0, 5).map((person, index) => (
+                        <span className={`avatar-color-${index % 4}`} key={person.id}>{getInitials(person.name)}</span>
+                      ))}
+                    </div>
+                    <div className="classroom-spy-actions">
+                      <button onClick={() => void watchBreakoutRoom(breakoutRoom)} type="button">Watch</button>
+                      {isHostClassRole && (
+                        <button onClick={() => void enterBreakoutRoom(breakoutRoom.id)} type="button">Join room</button>
                       )}
-                      {delivery === "failed" && (
-                        <span className="classroom-chat-delivery failed">
-                          Could not send.{" "}
-                          <button
-                            disabled={chatSending}
-                            onClick={() => {
-                              if (localKey) void transmitChatMessage(localKey, message.body);
-                            }}
-                            type="button"
-                          >
-                            Retry
-                          </button>
-                        </span>
-                      )}
-                    </article>
-                  );
-                })}
+                    </div>
+                  </article>
+                ))}
               </div>
-              {classRole === "observer" ? (
-                <p className="classroom-chat-observer-note">Observers can’t send messages</p>
-              ) : (
-                <>
-                  <form className="classroom-chat-composer" onSubmit={submitChatMessage}>
-                    <button
-                      aria-label="Attach file"
-                      className="classroom-chat-attach"
-                      disabled
-                      title="Coming soon"
-                      type="button"
-                    >
-                      <Paperclip aria-hidden="true" size={17} />
-                    </button>
-                    <textarea
-                      aria-label="Write a message"
-                      disabled={!myPermissions.chat}
-                      maxLength={2000}
-                      onChange={(event) => setChatDraft(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" && !event.shiftKey) {
-                          event.preventDefault();
-                          event.currentTarget.form?.requestSubmit();
-                        }
-                      }}
-                      placeholder="Write a message…"
-                      rows={2}
-                      title={!myPermissions.chat ? "Your tutor has turned this off" : undefined}
-                      value={chatDraft}
-                    />
-                    <button
-                      aria-label="Send message"
-                      className="classroom-chat-send"
-                      disabled={!myPermissions.chat || !chatDraft.trim() || chatSending || chatDraft.trim().length > 2000}
-                      title={!myPermissions.chat ? "Your tutor has turned this off" : "Send message"}
-                      type="submit"
-                    >
-                      <Send aria-hidden="true" size={16} />
-                    </button>
-                  </form>
-                  {!myPermissions.chat && (
-                    <p className="classroom-chat-observer-note">Your tutor has turned this off</p>
-                  )}
-                </>
+              {breakoutError && <p className="classroom-breakout-error" role="alert">{breakoutError}</p>}
+              {isHostClassRole && (
+                <div className="classroom-spy-footer">
+                  <button
+                    className="classroom-spy-announce"
+                    onClick={() => {
+                      setAnnouncementError("");
+                      setAnnouncementOpen(true);
+                    }}
+                    type="button"
+                  >
+                    Send announcement
+                  </button>
+                  <button
+                    className="classroom-spy-return"
+                    disabled={breakoutState.rooms.length === 0}
+                    onClick={() => void endAllBreakoutRooms()}
+                    type="button"
+                  >
+                    Bring everyone back
+                  </button>
+                </div>
               )}
             </section>
           ) : peopleOpen ? (
@@ -2849,8 +3599,25 @@ function RoomTestControls({
           ) : (
             <div className="classroom-video-panel">
               <header className="classroom-video-heading">
-                <strong>{roomName || "Main room"}</strong>
-                <span>{visibleParticipants.length} people</span>
+                <strong>
+                  {boardRoomId && currentBreakoutRoom
+                    ? `${currentBreakoutRoom.name} · Breakout room`
+                    : "Main room"}
+                </strong>
+                <span>
+                  {boardRoomId && currentBreakoutRoom
+                    ? currentBreakoutRoom.memberCount
+                    : visibleParticipants.length} people
+                </span>
+                {isHostClassRole && boardRoomId && (
+                  <button
+                    className="classroom-main-room-pill"
+                    onClick={() => void enterBreakoutRoom(null)}
+                    type="button"
+                  >
+                    Main room
+                  </button>
+                )}
               </header>
               <div className={`classroom-video-grid ${layout === "sidebar" ? "single-column" : ""}`}>
                 {visibleParticipants.map((participant, index) => {
@@ -2894,23 +3661,175 @@ function RoomTestControls({
               </div>
             </div>
           )}
+          {chatOpen && (
+            <section aria-label="Class chat" className="classroom-chat-panel">
+              <header>
+                <div>
+                  <strong>Class chat</strong>
+                  <span>History is saved in this space</span>
+                </div>
+                <button aria-label="Close chat panel" onClick={() => setChatOpen(false)} type="button">
+                  <X aria-hidden="true" size={17} />
+                </button>
+              </header>
+              <div
+                aria-live="polite"
+                aria-relevant="additions"
+                className="classroom-chat-messages"
+                onScroll={(event) => {
+                  const element = event.currentTarget;
+                  chatAtBottomRef.current =
+                    element.scrollHeight - element.scrollTop - element.clientHeight < 48;
+                }}
+                ref={chatListRef}
+                role="log"
+              >
+                {chatHistoryLoading && chatMessages.length === 0 && (
+                  <p className="classroom-chat-info">Loading messages…</p>
+                )}
+                {chatHistoryError && (
+                  <p className="classroom-chat-info" role="alert">
+                    {chatHistoryError}{" "}
+                    <button
+                      onClick={() => setChatHistoryAttempt((attempt) => attempt + 1)}
+                      type="button"
+                    >
+                      Retry
+                    </button>
+                  </p>
+                )}
+                {!chatHistoryLoading && !chatHistoryError && chatMessages.length === 0 && (
+                  <p className="classroom-chat-info">No messages yet. Start the conversation.</p>
+                )}
+                {chatMessages.map(({ message, delivery, localKey }) => {
+                  const ownMessage = message.participantId === localParticipant.identity;
+                  return (
+                    <article
+                      className={`classroom-chat-message${ownMessage ? " own" : ""}`}
+                      key={message.id}
+                    >
+                      <div className="classroom-chat-message-meta">
+                        <strong>
+                          {message.senderName || "Observer"}{ownMessage ? " (you)" : ""}
+                        </strong>
+                        <span className={`classroom-chat-role role-${message.senderRole}`}>
+                          {message.senderRole === "observer"
+                            ? "Observer"
+                            : formatClassRole(message.senderRole)}
+                        </span>
+                        <time dateTime={message.createdAt}>
+                          {new Date(message.createdAt).toLocaleTimeString([], {
+                            hour: "numeric",
+                            minute: "2-digit",
+                          })}
+                        </time>
+                      </div>
+                      <p>{message.body}</p>
+                      {delivery === "sending" && (
+                        <span className="classroom-chat-delivery">Sending…</span>
+                      )}
+                      {delivery === "failed" && (
+                        <span className="classroom-chat-delivery failed">
+                          Could not send.{" "}
+                          <button
+                            disabled={chatSending}
+                            onClick={() => {
+                              if (localKey) void transmitChatMessage(localKey, message.body);
+                            }}
+                            type="button"
+                          >
+                            Retry
+                          </button>
+                        </span>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+              {classRole === "observer" ? (
+                <p className="classroom-chat-observer-note">Observers can’t send messages</p>
+              ) : (
+                <>
+                  <form className="classroom-chat-composer" onSubmit={submitChatMessage}>
+                    <button
+                      aria-label="Attach file"
+                      className="classroom-chat-attach"
+                      disabled
+                      title="Coming soon"
+                      type="button"
+                    >
+                      <Paperclip aria-hidden="true" size={17} />
+                    </button>
+                    <textarea
+                      aria-label="Write a message"
+                      disabled={!myPermissions.chat}
+                      maxLength={2000}
+                      onChange={(event) => setChatDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && !event.shiftKey) {
+                          event.preventDefault();
+                          event.currentTarget.form?.requestSubmit();
+                        }
+                      }}
+                      placeholder="Write a message…"
+                      rows={2}
+                      title={!myPermissions.chat ? "Your tutor has turned this off" : undefined}
+                      value={chatDraft}
+                    />
+                    <button
+                      aria-label="Send message"
+                      className="classroom-chat-send"
+                      disabled={!myPermissions.chat || !chatDraft.trim() || chatSending || chatDraft.trim().length > 2000}
+                      title={!myPermissions.chat ? "Your tutor has turned this off" : "Send message"}
+                      type="submit"
+                    >
+                      <Send aria-hidden="true" size={16} />
+                    </button>
+                  </form>
+                  {!myPermissions.chat && (
+                    <p className="classroom-chat-observer-note">Your tutor has turned this off</p>
+                  )}
+                </>
+              )}
+            </section>
+          )}
         </aside>
 
         {permissionNotice && (
           <div className="classroom-permission-notice" role="status">{permissionNotice}</div>
         )}
 
-        {isHostClassRole && (
+        {(isHostClassRole || classRole === "observer") && (
           <nav aria-label="Participant layout" className="classroom-layout-bar">
-            <button aria-label="Grid layout" aria-pressed={layout === "grid"} className={layout === "grid" ? "selected" : ""} onClick={() => setLayout("grid")} title="Grid" type="button">
-              <Grid2X2 aria-hidden="true" size={17} />
-            </button>
-            <button aria-label="Sidebar layout" aria-pressed={layout === "sidebar"} className={layout === "sidebar" ? "selected" : ""} onClick={() => setLayout("sidebar")} title="Sidebar" type="button">
-              <PanelRight aria-hidden="true" size={17} />
-            </button>
-            <button aria-label="Floating layout" aria-pressed={layout === "floating"} className={layout === "floating" ? "selected" : ""} onClick={() => setLayout("floating")} title="Floating" type="button">
-              <PictureInPicture2 aria-hidden="true" size={17} />
-            </button>
+            {isHostClassRole && (
+              <>
+                <button aria-label="Grid layout" aria-pressed={layout === "grid"} className={layout === "grid" ? "selected" : ""} onClick={() => setLayout("grid")} title="Grid" type="button">
+                  <Grid2X2 aria-hidden="true" size={17} />
+                </button>
+                <button aria-label="Sidebar layout" aria-pressed={layout === "sidebar"} className={layout === "sidebar" ? "selected" : ""} onClick={() => setLayout("sidebar")} title="Sidebar" type="button">
+                  <PanelRight aria-hidden="true" size={17} />
+                </button>
+                <button aria-label="Floating layout" aria-pressed={layout === "floating"} className={layout === "floating" ? "selected" : ""} onClick={() => setLayout("floating")} title="Floating" type="button">
+                  <PictureInPicture2 aria-hidden="true" size={17} />
+                </button>
+              </>
+            )}
+            {breakoutState.rooms.length > 0 && (
+              <button
+                aria-label="Spy mode"
+                aria-pressed={breakoutPanelOpen || isViewingSpyRoom}
+                className={breakoutPanelOpen || isViewingSpyRoom ? "selected" : ""}
+                onClick={() => {
+                  setChatOpen(false);
+                  setPeopleOpen(false);
+                  setBreakoutPanelOpen((open) => !open);
+                }}
+                title="Spy mode"
+                type="button"
+              >
+                <Eye aria-hidden="true" size={17} />
+              </button>
+            )}
           </nav>
         )}
 
@@ -2954,11 +3873,14 @@ function RoomTestControls({
             aria-label={chatOpen ? "Close chat panel" : "Open chat panel"}
             className={chatOpen ? "selected" : ""}
             onClick={() => {
+              if (isViewingSpyRoom) return;
               const opening = !chatOpen;
               setChatOpen(opening);
               setPeopleOpen(false);
+              if (opening) setBreakoutPanelOpen(false);
               if (opening) setChatUnread(0);
             }}
+            disabled={isViewingSpyRoom || classRole === "observer"}
             title="Chat"
             type="button"
           >
@@ -3068,6 +3990,8 @@ function JoinPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [signedInName, setSignedInName] = useState("");
 
+  useSessionEnded(sessionId, joinPath);
+
   useEffect(() => {
     let active = true;
     setStep("checking");
@@ -3097,7 +4021,14 @@ function JoinPage() {
           if (!active) return;
           setSessionId(result.session.id);
           if (result.participant.status === "admitted") {
-            navigate("/lobby", { state: { spaceName: resolvedSpace.name, fromJoin: true, joinPath } });
+            navigate("/lobby", {
+              state: {
+                spaceName: resolvedSpace.name,
+                sessionId: result.session.id,
+                fromJoin: true,
+                joinPath,
+              },
+            });
           } else {
             setStep(result.participant.status);
           }
@@ -3169,7 +4100,7 @@ function JoinPage() {
     let active = true;
     const applyStatus = (status: string) => {
       if (status === "admitted") {
-        navigate("/lobby", { state: { spaceName, fromJoin: true, joinPath } });
+        navigate("/lobby", { state: { spaceName, sessionId, fromJoin: true, joinPath } });
       } else if (status === "denied") {
         setStep("denied");
       } else if (status === "removed") {
@@ -3225,7 +4156,7 @@ function JoinPage() {
       const result = await joinSpace(token, name.trim());
       setSessionId(result.session.id);
       if (result.participant.status === "admitted") {
-        navigate("/lobby", { state: { spaceName, fromJoin: true, joinPath } });
+        navigate("/lobby", { state: { spaceName, sessionId: result.session.id, fromJoin: true, joinPath } });
       } else {
         setStep(result.participant.status);
       }
@@ -3248,7 +4179,7 @@ function JoinPage() {
       const result = await joinSpace(token);
       setSessionId(result.session.id);
       if (result.participant.status === "admitted") {
-        navigate("/lobby", { state: { spaceName, fromJoin: true, joinPath } });
+        navigate("/lobby", { state: { spaceName, sessionId: result.session.id, fromJoin: true, joinPath } });
       } else {
         setStep(result.participant.status);
       }
@@ -3451,8 +4382,17 @@ function LobbyPage() {
   const { user, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
+  const pageState: unknown = location.state;
+  const pageSessionId =
+    typeof pageState === "object" &&
+    pageState !== null &&
+    "sessionId" in pageState &&
+    typeof pageState.sessionId === "string"
+      ? pageState.sessionId
+      : null;
   const previewRef = useRef<HTMLVideoElement>(null);
   const [checking, setChecking] = useState(true);
+  const [sessionId, setSessionId] = useState<string | null>(pageSessionId);
   const [cameraEnabled, setCameraEnabled] = useState(true);
   const [microphoneEnabled, setMicrophoneEnabled] = useState(true);
   const [cameraDeviceId, setCameraDeviceId] = useState("");
@@ -3469,7 +4409,6 @@ function LobbyPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [speakerTestRunning, setSpeakerTestRunning] = useState(false);
-  const pageState: unknown = location.state;
   const fromJoin =
     typeof pageState === "object" &&
     pageState !== null &&
@@ -3484,6 +4423,8 @@ function LobbyPage() {
       : "";
   const joinPath = getJoinPath(pageState);
 
+  useSessionEnded(sessionId, joinPath);
+
   useEffect(() => {
     let active = true;
     function returnToJoin() {
@@ -3496,6 +4437,7 @@ function LobbyPage() {
     getJoinStatus()
       .then((result) => {
         if (!active) return;
+        setSessionId(result.sessionId);
         if (result.status !== "admitted") {
           returnToJoin();
           return;
@@ -3503,12 +4445,12 @@ function LobbyPage() {
         setChecking(false);
       })
       .catch(() => {
-        if (active) returnToJoin();
+        if (active && !pageSessionId) returnToJoin();
       });
     return () => {
       active = false;
     };
-  }, [fromJoin, navigate]);
+  }, [fromJoin, navigate, pageSessionId]);
 
   useEffect(() => {
     if (checking) return;

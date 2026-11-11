@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { TrackSource } from "livekit-server-sdk";
 import { z } from "zod";
+import { config } from "../../config.js";
 import { prisma } from "../../db.js";
 import { requireRoles } from "../../plugins/auth.js";
 import {
@@ -20,7 +21,11 @@ import {
   updateSessionDefaultPermissions,
 } from "./permissions.js";
 import { permissionKeys } from "./permissions.js";
-import { emitJoinStatus } from "../join/events.js";
+import {
+  emitJoinStatus,
+  subscribeToSessionEvents,
+} from "../join/events.js";
+import { getOptionalUser, getParticipantCookieId } from "../join/service.js";
 
 const sessionParamsSchema = z.object({ sessionId: z.string().uuid() });
 const participantParamsSchema = z.object({ id: z.string().uuid() });
@@ -94,6 +99,127 @@ async function requireSessionHost(
 }
 
 export const sessionRoutes: FastifyPluginAsync = async (app) => {
+  app.get(
+    "/sessions/:sessionId/events",
+    {
+      schema: {
+        tags: ["Sessions"],
+        summary: "Subscribe to session events",
+        description:
+          "Streams session-wide events to any participant, regardless of role or participant status.",
+        security: [{ participantCookieAuth: [] }, { cookieAuth: [] }],
+        params: {
+          type: "object",
+          required: ["sessionId"],
+          properties: { sessionId: { type: "string", format: "uuid" } },
+        },
+        response: {
+          200: { type: "string" },
+          400: errorResponse,
+          401: errorResponse,
+          404: errorResponse,
+          500: errorResponse,
+        },
+      },
+    },
+    async (request, reply) => {
+      const params = sessionParamsSchema.safeParse(request.params);
+      if (!params.success) return invalidParams(reply);
+
+      const participantId = getParticipantCookieId(request);
+      const user = participantId ? null : await getOptionalUser(request);
+      if (!participantId && !user) {
+        return reply.code(401).send({ message: "Authentication required" });
+      }
+
+      let active = false;
+      let closed = false;
+      let sessionEnded = false;
+      const queuedEvents: Array<{ type: "session-ended" }> = [];
+      const raw = reply.raw;
+      let keepAlive: ReturnType<typeof setInterval> | null = null;
+      const sendEvent = (event: { type: "session-ended" }) => {
+        if (active && !raw.destroyed) {
+          raw.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+          sessionEnded = true;
+          cleanup();
+          raw.end();
+        } else {
+          queuedEvents.push(event);
+        }
+      };
+      const unsubscribe = subscribeToSessionEvents(params.data.sessionId, sendEvent);
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        if (keepAlive !== null) clearInterval(keepAlive);
+        unsubscribe();
+        raw.off("close", cleanup);
+        request.raw.socket.off("close", cleanup);
+      };
+
+      const participantWhere = participantId
+        ? { id: participantId, sessionId: params.data.sessionId }
+        : user
+          ? { userId: user.id, sessionId: params.data.sessionId }
+          : null;
+      if (!participantWhere) {
+        cleanup();
+        return reply.code(401).send({ message: "Authentication required" });
+      }
+      let participant: {
+        id: string;
+        session: { endedAt: Date | null };
+      } | null;
+      try {
+        participant = await prisma.participant.findFirst({
+          where: participantWhere,
+          select: {
+            id: true,
+            session: { select: { endedAt: true } },
+          },
+        });
+      } catch (error) {
+        cleanup();
+        throw error;
+      }
+      if (!participant) {
+        cleanup();
+        return reply.code(404).send({ message: "Participant not found in session" });
+      }
+
+      reply.hijack();
+      raw.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+        "Access-Control-Allow-Origin": config.FRONTEND_ORIGIN,
+        "Access-Control-Allow-Credentials": "true",
+        Vary: "Origin",
+      });
+      raw.flushHeaders();
+      raw.write(": connected\n\n");
+      active = true;
+      raw.on("close", cleanup);
+      request.raw.socket.on("close", cleanup);
+
+      if (participant.session.endedAt) {
+        sendEvent({ type: "session-ended" });
+        return;
+      }
+      for (const event of queuedEvents) {
+        if (sessionEnded) break;
+        sendEvent(event);
+      }
+      queuedEvents.length = 0;
+      if (sessionEnded) return;
+      keepAlive = setInterval(() => {
+        if (!raw.destroyed) raw.write(": ping\n\n");
+      }, 25_000);
+    },
+  );
+
   app.get(
     "/sessions",
     {
@@ -419,11 +545,24 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
   app.post(
     "/sessions/:sessionId/end",
     {
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: "1 minute",
+          hook: "preHandler",
+          keyGenerator: async (request) => {
+            const user = await getOptionalUser(request);
+            if (user) return `user:${user.id}`;
+            const participantId = getParticipantCookieId(request);
+            return participantId ? `participant:${participantId}` : `ip:${request.ip}`;
+          },
+        },
+      },
       schema: {
         tags: ["Sessions"],
         summary: "End a session (admitted tutor or admin participant only)",
         description:
-          "Ends the session, marks its admitted and waiting participants as left, and deletes the matching LiveKit room.",
+          "Ends the session for everyone, clears breakout assignments, keeps boards, deletes the main and breakout LiveKit rooms, and emits a session-ended event.",
         security: [{ participantCookieAuth: [] }, { cookieAuth: [] }],
         params: {
           type: "object",
@@ -437,8 +576,10 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
             required: ["message"],
           },
           400: errorResponse,
+          401: errorResponse,
           403: errorResponse,
           404: errorResponse,
+          429: errorResponse,
           500: errorResponse,
         },
       },
@@ -450,6 +591,9 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       const result = await endCurrentSession(request, params.data.sessionId);
       if (result.kind === "not-found") {
         return reply.code(404).send({ message: "Session not found" });
+      }
+      if (result.kind === "unauthenticated") {
+        return reply.code(401).send({ message: "Authentication required" });
       }
       if (result.kind === "forbidden") {
         return reply.code(403).send({ message: "Not allowed to end this session" });

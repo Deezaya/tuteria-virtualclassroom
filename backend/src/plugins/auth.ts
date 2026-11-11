@@ -30,6 +30,7 @@ declare module "@fastify/jwt" {
       classRole?: string;
       documentName?: string;
       editing?: boolean;
+      spy?: boolean;
     };
     user: {
       sub: string;

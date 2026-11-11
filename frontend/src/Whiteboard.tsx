@@ -22,6 +22,8 @@ type BoardProps = {
   classRole: ClassRole;
   displayName: string;
   sessionId: string;
+  roomId: string | null;
+  spyMode: boolean;
 };
 type SerializedElement = { id: string; data: string };
 type PointerUpdate = {
@@ -29,13 +31,19 @@ type PointerUpdate = {
   button: "down" | "up";
 };
 
-const apiUrl = new URL(import.meta.env.VITE_API_URL ?? "http://127.0.0.1:3000");
-const boardSocketUrl = new URL(
-  import.meta.env.VITE_BOARD_WS_URL ?? "/board",
-  apiUrl,
-);
-boardSocketUrl.protocol = apiUrl.protocol === "https:" ? "wss:" : "ws:";
-boardSocketUrl.host = apiUrl.host;
+const apiUrl = import.meta.env.VITE_API_URL;
+const configuredBoardSocketUrl = import.meta.env.VITE_BOARD_WS_URL;
+
+if (!apiUrl) {
+  throw new Error("VITE_API_URL must be set to the backend URL.");
+}
+if (!configuredBoardSocketUrl) {
+  throw new Error("VITE_BOARD_WS_URL must be set to the board WebSocket URL.");
+}
+
+const boardSocketUrl = new URL(configuredBoardSocketUrl, apiUrl);
+if (boardSocketUrl.protocol === "https:") boardSocketUrl.protocol = "wss:";
+if (boardSocketUrl.protocol === "http:") boardSocketUrl.protocol = "ws:";
 boardSocketUrl.pathname = "/board";
 boardSocketUrl.search = "";
 boardSocketUrl.hash = "";
@@ -108,7 +116,14 @@ function readRemoteElements(elementMap: Y.Map<string>): OrderedExcalidrawElement
     .sort((a, b) => a.index.localeCompare(b.index));
 }
 
-export default function Whiteboard({ canEdit, classRole, displayName, sessionId }: BoardProps) {
+export default function Whiteboard({
+  canEdit,
+  classRole,
+  displayName,
+  sessionId,
+  roomId,
+  spyMode,
+}: BoardProps) {
   const [attempt, setAttempt] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -216,7 +231,10 @@ export default function Whiteboard({ canEdit, classRole, displayName, sessionId 
 
     async function connect() {
       try {
-        const credentials = await getBoardToken(sessionId);
+        const credentials = await getBoardToken(sessionId, {
+          ...(roomId ? { roomId } : {}),
+          ...(spyMode ? { spy: true } : {}),
+        });
         if (!active) return;
 
         doc = new Y.Doc();
@@ -233,7 +251,10 @@ export default function Whiteboard({ canEdit, classRole, displayName, sessionId 
           name: credentials.documentName,
           document: doc,
           token: async () => {
-            const refreshed = await getBoardToken(sessionId);
+            const refreshed = await getBoardToken(sessionId, {
+              ...(roomId ? { roomId } : {}),
+              ...(spyMode ? { spy: true } : {}),
+            });
             if (refreshed.documentName !== credentials.documentName) {
               throw new Error("The board session changed. Rejoin the class to continue.");
             }
@@ -289,7 +310,7 @@ export default function Whiteboard({ canEdit, classRole, displayName, sessionId 
       active = false;
       dispose();
     };
-  }, [attempt, classRole, displayName, sessionId]);
+  }, [attempt, classRole, displayName, roomId, sessionId, spyMode]);
 
   function handleChange(elements: readonly OrderedExcalidrawElement[]) {
     if (!canEditRef.current || !elementMapRef.current) return;

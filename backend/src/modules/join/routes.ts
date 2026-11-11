@@ -27,7 +27,7 @@ const errorResponse = {
 const participantCookieOptions = {
   httpOnly: true,
   secure: process.env.NODE_ENV === "production",
-  sameSite: "strict" as const,
+  sameSite: process.env.NODE_ENV === "production" ? ("none" as const) : ("strict" as const),
   path: "/",
   maxAge: 8 * 60 * 60,
 };
@@ -304,8 +304,8 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
 
       reply.hijack();
       raw.writeHead(200, {
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-cache, no-transform",
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
         Connection: "keep-alive",
         "X-Accel-Buffering": "no",
         "Access-Control-Allow-Origin": config.FRONTEND_ORIGIN,
@@ -330,7 +330,7 @@ export const joinRoutes: FastifyPluginAsync = async (app) => {
       }
       queuedStatuses.length = 0;
       keepAlive = setInterval(() => {
-        if (!raw.destroyed) raw.write(": keep-alive\n\n");
+        if (!raw.destroyed) raw.write(": ping\n\n");
       }, 25_000);
     },
   );

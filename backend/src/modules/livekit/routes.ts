@@ -22,6 +22,7 @@ async function findCurrentParticipant(request: FastifyRequest) {
         classRole: true,
         status: true,
         permissions: true,
+        breakoutRoomId: true,
         session: {
           select: { id: true, endedAt: true, spaceId: true },
         },
@@ -50,6 +51,7 @@ async function findCurrentParticipant(request: FastifyRequest) {
       classRole: true,
       status: true,
       permissions: true,
+      breakoutRoomId: true,
       session: {
         select: { id: true, endedAt: true, spaceId: true },
       },

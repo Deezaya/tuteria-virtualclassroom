@@ -7,6 +7,7 @@ import {
   getOptionalUser,
   getParticipantCookieId,
 } from "../join/service.js";
+import { emitSessionEvent } from "../join/events.js";
 
 const waitingGuestWhere = {
   classRole: "guest" as const,
@@ -137,13 +138,15 @@ export async function endCurrentSession(
   sessionId: string,
 ): Promise<EndSessionResult> {
   const current = await findCurrentParticipant(request, sessionId);
+  if (!current.authenticated) return { kind: "unauthenticated" };
   return endSession(sessionId, current.participant?.id ?? null);
 }
 
 type EndSessionResult =
+  | { kind: "unauthenticated" }
   | { kind: "not-found" }
   | { kind: "forbidden" }
-  | { kind: "ended" }
+  | { kind: "ended"; breakoutRoomIds: string[] }
   | { kind: "already-ended" };
 
 export async function endSession(
@@ -153,19 +156,29 @@ export async function endSession(
   const result = await prisma.$transaction(async (transaction) => {
     const session = await transaction.session.findUnique({
       where: { id: sessionId },
-      select: { id: true, endedAt: true },
+      select: {
+        id: true,
+        endedAt: true,
+        breakoutRooms: { select: { id: true } },
+      },
     });
     if (!session) return { kind: "not-found" as const };
 
     const participant = participantId
       ? await transaction.participant.findFirst({
           where: { id: participantId, sessionId },
-          select: { id: true, classRole: true, status: true },
+          select: {
+            id: true,
+            classRole: true,
+            status: true,
+            user: { select: { role: true } },
+          },
         })
       : null;
     if (
       !participant ||
-      (participant.classRole !== "admin" && participant.classRole !== "tutor")
+      (participant.classRole !== "admin" && participant.classRole !== "tutor") ||
+      (participant.user?.role !== "admin" && participant.user?.role !== "tutor")
     ) {
       return { kind: "forbidden" as const };
     }
@@ -194,11 +207,26 @@ export async function endSession(
       data: { status: "left", leftAt: endedAt },
     });
 
-    return { kind: "ended" as const };
+    await transaction.participant.updateMany({
+      where: { sessionId },
+      data: { breakoutRoomId: null },
+    });
+    await transaction.breakoutRoom.deleteMany({
+      where: { sessionId },
+    });
+
+    return {
+      kind: "ended" as const,
+      breakoutRoomIds: session.breakoutRooms.map((room) => room.id),
+    };
   });
 
   if (result.kind === "ended") {
-    await deleteLiveKitRoomIfPresent(sessionId);
+    emitSessionEvent(sessionId, { type: "session-ended" });
+    await Promise.all(
+      [sessionId, ...result.breakoutRoomIds.map((roomId) => `${sessionId}:${roomId}`)]
+        .map(deleteLiveKitRoomIfPresent),
+    );
   }
 
   return result;

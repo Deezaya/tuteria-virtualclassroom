@@ -8,7 +8,7 @@ import {
 
 type TokenParticipant = Pick<
   Participant,
-  "id" | "displayName" | "classRole" | "status" | "permissions"
+  "id" | "displayName" | "classRole" | "status" | "permissions" | "breakoutRoomId"
 > & {
   session: {
     id: string;
@@ -17,12 +17,21 @@ type TokenParticipant = Pick<
   };
 };
 
-export async function createParticipantToken(participant: TokenParticipant) {
+export async function createParticipantToken(
+  participant: TokenParticipant,
+  options: { roomName?: string; hidden?: boolean } = {},
+) {
   const permissions = readPermissions(participant.permissions);
   const canPublishSources = allowedTrackSources(permissions);
+  const roomName =
+    options.roomName ??
+    (participant.breakoutRoomId
+      ? `${participant.session.id}:${participant.breakoutRoomId}`
+      : participant.session.id);
+  const hidden = options.hidden === true;
   const token = new AccessToken(config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET, {
     identity: participant.id,
-    ...(participant.classRole === "observer"
+    ...(participant.classRole === "observer" || hidden
       ? {}
       : {
           name: participant.displayName ?? undefined,
@@ -33,17 +42,17 @@ export async function createParticipantToken(participant: TokenParticipant) {
 
   if (participant.classRole === "admin" || participant.classRole === "tutor") {
     token.addGrant({
-      room: participant.session.id,
+      room: roomName,
       roomJoin: true,
-      canPublish: canPublishSources.length > 0,
-      canPublishSources,
-      canPublishData: permissions.chat,
+      canPublish: !hidden && canPublishSources.length > 0,
+      ...(!hidden ? { canPublishSources } : {}),
+      canPublishData: !hidden && permissions.chat,
       canSubscribe: true,
-      roomAdmin: true,
+      ...(!hidden ? { roomAdmin: true } : {}),
     });
-  } else if (participant.classRole === "observer") {
+  } else if (participant.classRole === "observer" || hidden) {
     token.addGrant({
-      room: participant.session.id,
+      room: roomName,
       roomJoin: true,
       canPublish: false,
       canPublishData: false,
@@ -52,7 +61,7 @@ export async function createParticipantToken(participant: TokenParticipant) {
     });
   } else {
     token.addGrant({
-      room: participant.session.id,
+      room: roomName,
       roomJoin: true,
       canPublish: canPublishSources.length > 0,
       canPublishSources,

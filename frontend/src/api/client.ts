@@ -1,7 +1,8 @@
-const apiUrl = (import.meta.env.VITE_API_URL ?? "http://127.0.0.1:3000").replace(
-  /\/$/,
-  "",
-);
+const apiUrl = import.meta.env.VITE_API_URL?.replace(/\/$/, "");
+
+if (!apiUrl) {
+  throw new Error("VITE_API_URL must be set to the backend URL.");
+}
 
 export class ApiError extends Error {
   constructor(
@@ -125,7 +126,10 @@ export function createSpaceLink(
   );
 }
 
-export function getBoardToken(sessionId: string): Promise<{
+export function getBoardToken(
+  sessionId: string,
+  options: { roomId?: string; spy?: boolean } = {},
+): Promise<{
   token: string;
   documentName: string;
   expiresIn: number;
@@ -134,7 +138,108 @@ export function getBoardToken(sessionId: string): Promise<{
     token: string;
     documentName: string;
     expiresIn: number;
-  }>(`/boards/${encodeURIComponent(sessionId)}/token`, { method: "POST" });
+  }>(`/boards/${encodeURIComponent(sessionId)}/token`, {
+    method: "POST",
+    body: JSON.stringify(options),
+  });
+}
+
+export type BreakoutPerson = {
+  id: string;
+  name: string;
+  role: "student" | "guest";
+};
+export type BreakoutRoom = {
+  id: string;
+  name: string;
+  memberCount: number;
+  members: BreakoutPerson[];
+};
+export type BreakoutState = {
+  rooms: BreakoutRoom[];
+  unassigned: BreakoutPerson[];
+  ownRoom: { id: string; name: string } | null;
+};
+export type BreakoutArrangement = {
+  rooms: Array<{ id?: string; name: string; participantIds: string[] }>;
+};
+
+export function getBreakoutState(sessionId: string): Promise<BreakoutState> {
+  return request<BreakoutState>(`/sessions/${encodeURIComponent(sessionId)}/breakouts`);
+}
+
+export function applyBreakoutArrangement(
+  sessionId: string,
+  arrangement: BreakoutArrangement,
+): Promise<{ message: string }> {
+  return request<{ message: string }>(`/sessions/${encodeURIComponent(sessionId)}/breakouts`, {
+    method: "POST",
+    body: JSON.stringify(arrangement),
+  });
+}
+
+export function renameBreakoutRoom(
+  sessionId: string,
+  roomId: string,
+  name: string,
+): Promise<{ room: { id: string; name: string } }> {
+  return request<{ room: { id: string; name: string } }>(
+    `/sessions/${encodeURIComponent(sessionId)}/breakouts/${encodeURIComponent(roomId)}`,
+    { method: "PATCH", body: JSON.stringify({ name }) },
+  );
+}
+
+export function deleteBreakoutRoom(sessionId: string, roomId: string): Promise<{ message: string }> {
+  return request<{ message: string }>(
+    `/sessions/${encodeURIComponent(sessionId)}/breakouts/${encodeURIComponent(roomId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function endBreakoutRooms(sessionId: string): Promise<{ message: string }> {
+  return request<{ message: string }>(`/sessions/${encodeURIComponent(sessionId)}/breakouts/end`, {
+    method: "POST",
+  });
+}
+
+export function getBreakoutSpyToken(
+  sessionId: string,
+  roomId: string,
+): Promise<{ token: string; url: string }> {
+  return request<{ token: string; url: string }>(
+    `/sessions/${encodeURIComponent(sessionId)}/breakouts/${encodeURIComponent(roomId)}/spy-token`,
+    { method: "POST" },
+  );
+}
+
+export function joinBreakoutRoom(
+  sessionId: string,
+  roomId: string | null,
+): Promise<{
+  token: string;
+  url: string;
+  permissions: ClassPermissions;
+  roomId: string | null;
+}> {
+  return request<{
+    token: string;
+    url: string;
+    permissions: ClassPermissions;
+    roomId: string | null;
+  }>(`/sessions/${encodeURIComponent(sessionId)}/breakouts/join`, {
+    method: "POST",
+    body: JSON.stringify({ roomId }),
+  });
+}
+
+export function sendBreakoutAnnouncement(
+  sessionId: string,
+  text: string,
+): Promise<{ message: string }> {
+  return request<{ message: string }>(
+    `/sessions/${encodeURIComponent(sessionId)}/breakouts/announce`,
+    { method: "POST", body: JSON.stringify({ text }) },
+  );
 }
 
 export type JoinStatus = "waiting" | "admitted" | "denied" | "removed";
@@ -331,6 +436,10 @@ export function getJoinStatus(): Promise<{
 
 export function getJoinEventsUrl(): string {
   return `${apiUrl}/join/events`;
+}
+
+export function getSessionEventsUrl(sessionId: string): string {
+  return `${apiUrl}/sessions/${encodeURIComponent(sessionId)}/events`;
 }
 
 export function getWaitingParticipants(

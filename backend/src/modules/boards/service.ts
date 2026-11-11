@@ -17,6 +17,7 @@ type BoardTokenPayload = {
   sub: string;
   classRole: string;
   editing?: boolean;
+  spy?: boolean;
   documentName: string;
   exp: number;
 };
@@ -80,6 +81,8 @@ export function createBoardServer(app: FastifyInstance): void {
         typeof payload.sub !== "string" ||
         typeof payload.classRole !== "string" ||
         !classRoles.has(payload.classRole) ||
+        (payload.editing !== undefined && typeof payload.editing !== "boolean") ||
+        (payload.spy !== undefined && typeof payload.spy !== "boolean") ||
         typeof payload.documentName !== "string" ||
         payload.documentName !== documentName ||
         !Number.isInteger(payload.exp) ||
@@ -93,17 +96,42 @@ export function createBoardServer(app: FastifyInstance): void {
         select: {
           classRole: true,
           permissions: true,
+          breakoutRoomId: true,
           status: true,
-          session: { select: { endedAt: true, spaceId: true } },
+          session: { select: { id: true, endedAt: true, spaceId: true } },
         },
       });
       if (
         !participant ||
         participant.status !== "admitted" ||
         participant.classRole !== payload.classRole ||
-        participant.session.endedAt ||
-        `space:${participant.session.spaceId}:main` !== documentName
+        participant.session.endedAt
       ) {
+        throw new Error("Participant is no longer admitted to this board");
+      }
+
+      const documentRoomId = documentName.startsWith(`${participant.session.id}:`)
+        ? documentName.slice(participant.session.id.length + 1)
+        : null;
+      const documentRoom = documentRoomId
+        ? await prisma.breakoutRoom.findFirst({
+            where: {
+              id: documentRoomId,
+              sessionId: participant.session.id,
+            },
+            select: { id: true },
+          })
+        : null;
+      const isOwnBoard = participant.breakoutRoomId
+        ? documentRoom?.id === participant.breakoutRoomId
+        : `space:${participant.session.spaceId}:main` === documentName;
+      const isSpyBoard =
+        payload.spy === true &&
+        (payload.classRole === "admin" ||
+          payload.classRole === "tutor" ||
+          payload.classRole === "observer") &&
+        documentRoom !== null;
+      if (!isOwnBoard && !isSpyBoard) {
         throw new Error("Participant is no longer admitted to this board");
       }
 
@@ -114,6 +142,7 @@ export function createBoardServer(app: FastifyInstance): void {
           ? (participant.permissions as Record<string, unknown>)
           : {};
       const editing =
+        payload.editing !== false &&
         payload.classRole !== "observer" &&
         (typeof storedPermissions.editing === "boolean"
           ? storedPermissions.editing

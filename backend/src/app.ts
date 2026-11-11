@@ -1,3 +1,4 @@
+import { STATUS_CODES } from "node:http";
 import Fastify from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
@@ -8,6 +9,7 @@ import swaggerUi from "@fastify/swagger-ui";
 import { config } from "./config.js";
 import { authRoutes } from "./modules/auth/routes.js";
 import { boardRoutes } from "./modules/boards/routes.js";
+import { breakoutRoutes } from "./modules/breakouts/routes.js";
 import { chatRoutes } from "./modules/chat/routes.js";
 import { inviteRoutes } from "./modules/invites/routes.js";
 import { joinRoutes } from "./modules/join/routes.js";
@@ -16,8 +18,25 @@ import { sessionRoutes } from "./modules/sessions/routes.js";
 import { spaceRoutes } from "./modules/spaces/routes.js";
 import { registerAuthDecorators } from "./plugins/auth.js";
 
+
 export function buildApp() {
-  const app = Fastify({ logger: true });
+  const app = Fastify({ logger: true, trustProxy: true });
+    app.setErrorHandler((error: { statusCode?: number; message: string }, request, reply) => {
+    request.log.error({ err: error }, "Request failed.");
+    const statusCode =
+      error.statusCode && error.statusCode >= 400 && error.statusCode < 600
+        ? error.statusCode
+        : 500;
+
+    return reply.code(statusCode).send({
+      statusCode,
+      error: STATUS_CODES[statusCode] ?? "Error",
+      message:
+        process.env.NODE_ENV === "production" && statusCode >= 500
+          ? "Something went wrong. Please try again."
+          : error.message,
+    });
+  });
   registerAuthDecorators(app);
 
   app.register(cors, {
@@ -79,6 +98,7 @@ export function buildApp() {
   app.register(joinRoutes);
   app.register(livekitRoutes);
   app.register(boardRoutes);
+  app.register(breakoutRoutes);
   app.register(chatRoutes);
   app.register(sessionRoutes);
 

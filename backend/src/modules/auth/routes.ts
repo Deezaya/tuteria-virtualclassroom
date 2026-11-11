@@ -20,7 +20,7 @@ const createUserBodySchema = z.object({
 const cookieOptions = {
   httpOnly: true,
   secure: process.env.NODE_ENV === "production",
-  sameSite: "strict" as const,
+  sameSite: process.env.NODE_ENV === "production" ? ("none" as const) : ("strict" as const),
   path: "/",
 };
 
@@ -245,8 +245,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         ) {
           return reply.code(409).send({ message: "An account with that email already exists" });
         }
-        request.log.error("Account creation failed.");
-        return reply.code(500).send({ message: "Unable to create account" });
+        throw error;
       }
     },
   );
