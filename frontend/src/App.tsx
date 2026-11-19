@@ -127,8 +127,9 @@ import {
   type SessionTimerSnapshot,
 } from "./api/client";
 import { useAuth } from "./auth/AuthProvider";
+import { loadWhiteboard } from "./board/engine";
 
-const Whiteboard = lazy(() => import("./Whiteboard"));
+const Whiteboard = lazy(loadWhiteboard);
 
 type RoomMediaPreferences = {
   cameraEnabled: boolean;
