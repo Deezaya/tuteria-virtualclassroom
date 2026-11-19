@@ -1,7 +1,15 @@
 import { EventEmitter } from "node:events";
 
 export type JoinStatusEvent = "admitted" | "denied" | "removed";
-export type SessionEvent = { type: "session-ended" };
+export type SessionTimer = {
+  mode: "countdown" | "stopwatch";
+  startedAt: string;
+  endsAt: string | null;
+  label: string;
+};
+export type SessionEvent =
+  | { type: "session-ended" }
+  | { type: "timer-changed"; timer: SessionTimer | null; serverNow: string };
 
 const joinEvents = new EventEmitter();
 joinEvents.setMaxListeners(0);

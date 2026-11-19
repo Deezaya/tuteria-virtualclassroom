@@ -1,6 +1,7 @@
 import {
   lazy,
   Suspense,
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -33,6 +34,7 @@ import {
   MonitorUp,
   MoreVertical,
   Paperclip,
+  Play,
   Plus,
   PanelRight,
   PictureInPicture2,
@@ -97,6 +99,11 @@ import {
   resolveInvite,
   renameSpace,
   sendChatMessage,
+  getSessionTimer,
+  startSessionTimer,
+  stopSessionTimer,
+  updateRaisedHand,
+  sendSessionReaction,
   type ChatMessage,
   type Space,
   type SpaceScope,
@@ -116,6 +123,8 @@ import {
   type SessionParticipant,
   type BreakoutState,
   type BreakoutRoom,
+  type SessionTimer,
+  type SessionTimerSnapshot,
 } from "./api/client";
 import { useAuth } from "./auth/AuthProvider";
 
@@ -1242,6 +1251,41 @@ const permissionKeys: PermissionKey[] = [
   "fileUploads",
 ];
 const maxRenderedChatMessages = 200;
+const reactionEmojis = ["👍", "👏", "❤️", "😂", "😮", "⭐"] as const;
+type ReactionEmoji = (typeof reactionEmojis)[number];
+type FloatingReaction = {
+  id: number;
+  participantId: string;
+  emoji: ReactionEmoji;
+};
+
+function isSessionTimer(value: unknown): value is SessionTimer {
+  if (typeof value !== "object" || value === null) return false;
+  const timer = value as Record<string, unknown>;
+  return (
+    (timer.mode === "countdown" || timer.mode === "stopwatch") &&
+    typeof timer.startedAt === "string" &&
+    (typeof timer.endsAt === "string" || timer.endsAt === null) &&
+    typeof timer.label === "string"
+  );
+}
+
+
+function formatTimerDisplay(totalSeconds: number): string {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function defaultEndTimeValue(): string {
+  const endTime = new Date(Date.now() + 30 * 60_000);
+  return `${String(endTime.getHours()).padStart(2, "0")}:${String(endTime.getMinutes()).padStart(2, "0")}`;
+}
+
+function raisedAtFor(participant: LiveKitParticipant): string | null {
+  const raisedAt = participant.attributes.handRaised;
+  return raisedAt && !Number.isNaN(Date.parse(raisedAt)) ? raisedAt : null;
+}
 
 function isChatMessage(value: unknown): value is ChatMessage {
   if (typeof value !== "object" || value === null) return false;
@@ -1659,6 +1703,30 @@ function RoomTestControls({
   const [observerLinkLoading, setObserverLinkLoading] = useState(false);
   const [observerLinkError, setObserverLinkError] = useState("");
   const [myPermissions, setMyPermissions] = useState<ClassPermissions>(initialPermissions);
+  const [timerSnapshot, setTimerSnapshot] = useState<SessionTimerSnapshot>({
+    timer: null,
+    serverNow: new Date().toISOString(),
+  });
+  const timerSnapshotRef = useRef(timerSnapshot);
+  const serverClockOffsetRef = useRef(0);
+  const [localNow, setLocalNow] = useState(() => Date.now());
+  const [timerToast, setTimerToast] = useState("");
+  const timerToastRef = useRef<number | null>(null);
+  const notifiedTimerRef = useRef<string | null>(null);
+  const [timerMenuOpen, setTimerMenuOpen] = useState(false);
+  const [timerPanel, setTimerPanel] = useState<"end-time" | "custom" | null>(null);
+  const [timerEndTimeInput, setTimerEndTimeInput] = useState(defaultEndTimeValue);
+  const [timerCustomMinutes, setTimerCustomMinutes] = useState("15");
+  const [timerBusy, setTimerBusy] = useState(false);
+  const [myHandRaised, setMyHandRaised] = useState(false);
+  const [handRaisedAtById, setHandRaisedAtById] = useState<Record<string, string>>({});
+  const [reactionPopoverOpen, setReactionPopoverOpen] = useState(false);
+  const [reactionAnchor, setReactionAnchor] = useState({ top: 0, right: 0 });
+  const [floatingReactions, setFloatingReactions] = useState<FloatingReaction[]>([]);
+  const nextReactionIdRef = useRef(0);
+  const reactionTimeoutsRef = useRef(new Set<number>());
+  const timerMenuRef = useRef<HTMLDivElement>(null);
+  const reactionPopoverRef = useRef<HTMLDivElement>(null);
   const [breakoutState, setBreakoutState] = useState<BreakoutState>({
     rooms: [],
     unassigned: [],
@@ -1710,6 +1778,37 @@ function RoomTestControls({
     !(participant.identity === localParticipant.identity &&
       (classRole === "observer" || spyRoomId !== null)),
   );
+  const orderedVisibleParticipants = [...visibleParticipants].sort((left, right) => {
+    const leftRaisedAt = handRaisedAtById[left.identity];
+    const rightRaisedAt = handRaisedAtById[right.identity];
+    if (leftRaisedAt && rightRaisedAt) return Date.parse(leftRaisedAt) - Date.parse(rightRaisedAt);
+    if (leftRaisedAt) return -1;
+    if (rightRaisedAt) return 1;
+    return 0;
+  });
+  const orderedHostParticipants = [...hostParticipants].sort((left, right) => {
+    const leftRaisedAt = handRaisedAtById[left.id];
+    const rightRaisedAt = handRaisedAtById[right.id];
+    if (leftRaisedAt && rightRaisedAt) return Date.parse(leftRaisedAt) - Date.parse(rightRaisedAt);
+    if (leftRaisedAt) return -1;
+    if (rightRaisedAt) return 1;
+    return 0;
+  });
+  const timer = timerSnapshot.timer;
+  const adjustedNow = localNow + serverClockOffsetRef.current;
+  const timerSeconds = timer
+    ? Math.max(
+        0,
+        Math.ceil(
+          timer.mode === "stopwatch"
+            ? (adjustedNow - Date.parse(timer.startedAt)) / 1000
+            : ((timer.endsAt ? Date.parse(timer.endsAt) : adjustedNow) - adjustedNow) / 1000,
+        ),
+      )
+    : 0;
+  const canUseHand = classRole !== "observer" && !spyRoomId &&
+    (myPermissions.raiseHand || myHandRaised);
+  const canUseReactions = classRole !== "observer" && !spyRoomId && myPermissions.reactions;
   const currentBreakoutRoom =
     (spyRoomId
       ? breakoutState.rooms.find((room) => room.id === spyRoomId)
@@ -1727,6 +1826,240 @@ function RoomTestControls({
   const currentGuest = visibleWaitingGuests[0];
   chatOpenRef.current = chatOpen;
   localParticipantIdRef.current = localParticipant.identity;
+  timerSnapshotRef.current = timerSnapshot;
+
+  const notifyTimerExpired = useCallback((startedAt: string) => {
+    if (notifiedTimerRef.current === startedAt) return;
+    notifiedTimerRef.current = startedAt;
+    setTimerToast("Time's up");
+    if (timerToastRef.current !== null) window.clearTimeout(timerToastRef.current);
+    timerToastRef.current = window.setTimeout(() => {
+      setTimerToast("");
+      timerToastRef.current = null;
+    }, 4000);
+  }, []);
+
+  const applyTimerSnapshot = useCallback((
+    next: SessionTimer | null,
+    serverNow: string,
+  ) => {
+    const previous = timerSnapshotRef.current.timer;
+    serverClockOffsetRef.current = Date.parse(serverNow) - Date.now();
+    setLocalNow(Date.now());
+    if (
+      !next &&
+      previous?.mode === "countdown" &&
+      previous.endsAt &&
+      Date.parse(previous.endsAt) <= Date.parse(serverNow) + 1000
+    ) {
+      notifyTimerExpired(previous.startedAt);
+    }
+    if (next && notifiedTimerRef.current !== next.startedAt) {
+      notifiedTimerRef.current = null;
+    }
+    const updated = { timer: next, serverNow };
+    timerSnapshotRef.current = updated;
+    setTimerSnapshot(updated);
+  }, [notifyTimerExpired]);
+
+  const showFloatingReaction = useCallback((participantId: string, emoji: ReactionEmoji) => {
+    const id = nextReactionIdRef.current++;
+    setFloatingReactions((current) => [...current, { id, participantId, emoji }]);
+    const timeout = window.setTimeout(() => {
+      setFloatingReactions((current) => current.filter((reaction) => reaction.id !== id));
+      reactionTimeoutsRef.current.delete(timeout);
+    }, 3000);
+    reactionTimeoutsRef.current.add(timeout);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const events = new EventSource(getSessionEventsUrl(sessionId), { withCredentials: true });
+    const handleTimerChanged = (event: Event) => {
+      try {
+        const parsed: unknown = JSON.parse((event as MessageEvent<string>).data);
+        if (
+          typeof parsed === "object" &&
+          parsed !== null &&
+          "type" in parsed &&
+          parsed.type === "timer-changed" &&
+          "timer" in parsed &&
+          "serverNow" in parsed &&
+          (parsed.timer === null || isSessionTimer(parsed.timer)) &&
+          typeof parsed.serverNow === "string" &&
+          !Number.isNaN(Date.parse(parsed.serverNow))
+        ) {
+          applyTimerSnapshot(parsed.timer, parsed.serverNow);
+        }
+      } catch {
+        onError("A live timer update could not be read.");
+      }
+    };
+    events.addEventListener("timer-changed", handleTimerChanged);
+    getSessionTimer(sessionId)
+      .then((snapshot) => {
+        if (active) applyTimerSnapshot(snapshot.timer, snapshot.serverNow);
+      })
+      .catch(() => {
+        if (active) onError("Could not load the session timer.");
+      });
+    return () => {
+      active = false;
+      events.removeEventListener("timer-changed", handleTimerChanged);
+      events.close();
+    };
+  }, [applyTimerSnapshot, onError, sessionId]);
+
+  useEffect(() => {
+    if (!timer) return;
+    const tick = window.setInterval(() => {
+      const now = Date.now();
+      setLocalNow(now);
+      const current = timerSnapshotRef.current.timer;
+      if (
+        current?.mode === "countdown" &&
+        current.endsAt &&
+        Date.parse(current.endsAt) <= now + serverClockOffsetRef.current
+      ) {
+        notifyTimerExpired(current.startedAt);
+        const cleared = {
+          timer: null,
+          serverNow: new Date(now + serverClockOffsetRef.current).toISOString(),
+        };
+        timerSnapshotRef.current = cleared;
+        setTimerSnapshot(cleared);
+      }
+    }, 1000);
+    return () => window.clearInterval(tick);
+  }, [notifyTimerExpired, timer]);
+
+  useEffect(() => () => {
+    if (timerToastRef.current !== null) window.clearTimeout(timerToastRef.current);
+    for (const timeout of reactionTimeoutsRef.current) window.clearTimeout(timeout);
+    reactionTimeoutsRef.current.clear();
+  }, []);
+
+  useEffect(() => {
+    const currentHands: Record<string, string> = {};
+    for (const participant of participants) {
+      const raisedAt = raisedAtFor(participant);
+      if (raisedAt) currentHands[participant.identity] = raisedAt;
+    }
+    setHandRaisedAtById(currentHands);
+    setMyHandRaised(Boolean(currentHands[localParticipant.identity]));
+  }, [localParticipant.identity, participants]);
+
+  useEffect(() => {
+    const handleAttributesChanged = (
+      changedAttributes: Record<string, string>,
+      participant: LiveKitParticipant,
+    ) => {
+      if (!("handRaised" in changedAttributes)) return;
+      const raisedAt = participant.attributes.handRaised;
+      setHandRaisedAtById((current) => {
+        const next = { ...current };
+        if (raisedAt && !Number.isNaN(Date.parse(raisedAt))) {
+          next[participant.identity] = raisedAt;
+        } else {
+          delete next[participant.identity];
+        }
+        return next;
+      });
+      if (participant.identity === localParticipant.identity) {
+        setMyHandRaised(Boolean(raisedAt));
+      }
+    };
+    room.on(RoomEvent.ParticipantAttributesChanged, handleAttributesChanged);
+        return () => {
+      room.off(RoomEvent.ParticipantAttributesChanged, handleAttributesChanged);
+      };
+    }, [localParticipant.identity, room]);
+
+  async function startTimer(options:
+    | { mode: "countdown"; durationMinutes: number }
+    | { mode: "countdown"; endTime: string }
+    | { mode: "stopwatch" },
+  ) {
+    if (timerBusy) return;
+    setTimerBusy(true);
+    try {
+      const result = await startSessionTimer(sessionId, options);
+      applyTimerSnapshot(result.timer, result.serverNow);
+      setTimerPanel(null);
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : "Could not start the timer.");
+    } finally {
+      setTimerBusy(false);
+    }
+  }
+
+  async function stopTimer() {
+    if (timerBusy) return;
+    setTimerBusy(true);
+    try {
+      const result = await stopSessionTimer(sessionId);
+      applyTimerSnapshot(result.timer, result.serverNow);
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : "Could not stop the timer.");
+    } finally {
+      setTimerBusy(false);
+    }
+  }
+
+  async function toggleRaisedHand() {
+    const previousRaised = myHandRaised;
+    const raised = !previousRaised;
+    const previousTimestamp = handRaisedAtById[localParticipant.identity];
+    setMyHandRaised(raised);
+    setHandRaisedAtById((current) => {
+      const next = { ...current };
+      if (raised) next[localParticipant.identity] = new Date().toISOString();
+      else delete next[localParticipant.identity];
+      return next;
+    });
+    try {
+      const result = await updateRaisedHand(sessionId, raised);
+      setMyHandRaised(result.raised);
+      setHandRaisedAtById((current) => {
+        const next = { ...current };
+        if (result.raised && result.raisedAt) next[result.participantId] = result.raisedAt;
+        else delete next[result.participantId];
+        return next;
+      });
+    } catch (cause) {
+      setMyHandRaised(previousRaised);
+      setHandRaisedAtById((current) => {
+        const next = { ...current };
+        if (previousTimestamp) next[localParticipant.identity] = previousTimestamp;
+        else delete next[localParticipant.identity];
+        return next;
+      });
+      onError(cause instanceof Error ? cause.message : "Could not update your raised hand.");
+    }
+  }
+
+  async function lowerParticipantHand(participant: SessionParticipant) {
+    try {
+      await updateRaisedHand(sessionId, false, participant.id);
+      setHandRaisedAtById((current) => {
+        const next = { ...current };
+        delete next[participant.id];
+        return next;
+      });
+    } catch (cause) {
+      setPeopleError(cause instanceof Error ? cause.message : "Could not lower that hand.");
+    }
+  }
+
+  async function sendReaction(emoji: ReactionEmoji) {
+    setReactionPopoverOpen(false);
+    showFloatingReaction(localParticipant.identity, emoji);
+    try {
+      await sendSessionReaction(sessionId, emoji);
+    } catch (cause) {
+      onError(cause instanceof Error ? cause.message : "Could not send that reaction.");
+    }
+  }
 
   async function reconnectToRoom(
     attemptId: number,
@@ -2090,6 +2423,45 @@ function RoomTestControls({
           }
           return;
       }
+      if (topic === "timer") {
+        try {
+          const parsed: unknown = JSON.parse(new TextDecoder().decode(payload));
+          if (
+            typeof parsed === "object" &&
+            parsed !== null &&
+            "type" in parsed &&
+            parsed.type === "timer-changed" &&
+            "timer" in parsed &&
+            "serverNow" in parsed &&
+            (parsed.timer === null || isSessionTimer(parsed.timer)) &&
+            typeof parsed.serverNow === "string" &&
+            !Number.isNaN(Date.parse(parsed.serverNow))
+          ) {
+            applyTimerSnapshot(parsed.timer, parsed.serverNow);
+          }
+        } catch {
+          onError("A live timer update could not be read.");
+        }
+        return;
+      }
+      if (topic === "reaction") {
+        try {
+          const parsed: unknown = JSON.parse(new TextDecoder().decode(payload));
+          if (typeof parsed !== "object" || parsed === null) return;
+          const message = parsed as Record<string, unknown>;
+          if (
+            typeof message.participantId === "string" &&
+            message.participantId !== localParticipantIdRef.current &&
+            typeof message.emoji === "string" &&
+            reactionEmojis.includes(message.emoji as ReactionEmoji)
+          ) {
+            showFloatingReaction(message.participantId, message.emoji as ReactionEmoji);
+          }
+        } catch {
+          return;
+        }
+        return;
+      }
       if (topic !== "chat" && topic !== "permissions" && topic !== "classroom-control") return;
       try {
         const parsed: unknown = JSON.parse(new TextDecoder().decode(payload));
@@ -2173,7 +2545,16 @@ function RoomTestControls({
     return () => {
       room.off(RoomEvent.DataReceived, handleData);
     };
-  }, [classRole, isHostClassRole, onError, room, sessionId, spyRoomId]);
+  }, [
+    applyTimerSnapshot,
+    classRole,
+    isHostClassRole,
+    onError,
+    room,
+    sessionId,
+    showFloatingReaction,
+    spyRoomId,
+  ]);
 
   useEffect(() => {
     const handlePermissionsChanged = (
@@ -2246,6 +2627,26 @@ function RoomTestControls({
     document.addEventListener("pointerdown", closeOnOutside);
     return () => document.removeEventListener("pointerdown", closeOnOutside);
   }, [menuOpen]);
+
+  useEffect(() => {
+    if (!timerMenuOpen) return;
+    function closeTimerOnOutside(event: PointerEvent) {
+      if (!timerMenuRef.current?.contains(event.target as Node)) setTimerMenuOpen(false);
+    }
+    document.addEventListener("pointerdown", closeTimerOnOutside);
+    return () => document.removeEventListener("pointerdown", closeTimerOnOutside);
+  }, [timerMenuOpen]);
+
+  useEffect(() => {
+    if (!reactionPopoverOpen) return;
+    function closeReactionOnOutside(event: PointerEvent) {
+      if (!reactionPopoverRef.current?.contains(event.target as Node)) {
+        setReactionPopoverOpen(false);
+      }
+    }
+    document.addEventListener("pointerdown", closeReactionOnOutside);
+    return () => document.removeEventListener("pointerdown", closeReactionOnOutside);
+  }, [reactionPopoverOpen]);
 
   useEffect(() => {
     if (!inviteMenuOpen) return;
@@ -2986,9 +3387,130 @@ function RoomTestControls({
             </section>
           )}
         </div>
-        <button className="classroom-topbar-icon" disabled title="Coming soon" type="button">
-          <Clock3 aria-hidden="true" size={17} />
-        </button>
+        <div className="classroom-timer-menu" ref={timerMenuRef}>
+          <button
+            aria-expanded={timerMenuOpen}
+            aria-haspopup="dialog"
+            aria-label="Class timer"
+            className={`classroom-topbar-icon${timerMenuOpen ? " active" : ""}${timer ? " timer-running" : ""}`}
+            onClick={() => setTimerMenuOpen((open) => !open)}
+            title={timer ? "Timer running" : "Class timer"}
+            type="button"
+          >
+            <Clock3 aria-hidden="true" size={17} />
+            {timer && <i aria-hidden="true" />}
+          </button>
+          {timerMenuOpen && (
+            <section aria-label="Class timer" className="classroom-timer-popup" role="dialog">
+              {timer && (
+                <div className="classroom-timer-card">
+                  <div>
+                    <strong>{timer.label}</strong>
+                    <span>{formatTimerDisplay(timerSeconds)}</span>
+                  </div>
+                  {isHostClassRole && (
+                    <button disabled={timerBusy} onClick={() => void stopTimer()} type="button">
+                      Stop
+                    </button>
+                  )}
+                </div>
+              )}
+              {isHostClassRole ? (
+                <>
+                  <span className="classroom-timer-section-label">QUICK DURATIONS</span>
+                  <div className="classroom-timer-quick-durations">
+                    {[15, 30, 60].map((minutes) => (
+                      <button
+                        disabled={timerBusy}
+                        key={minutes}
+                        onClick={() => void startTimer({ mode: "countdown", durationMinutes: minutes })}
+                        type="button"
+                      >
+                        {minutes === 60 ? "1 HOUR" : `${minutes} MIN`}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="classroom-timer-divider" />
+                  <button
+                    aria-expanded={timerPanel === "end-time"}
+                    className="classroom-timer-option"
+                    onClick={() => setTimerPanel((current) => current === "end-time" ? null : "end-time")}
+                    type="button"
+                  >
+                    <Clock3 aria-hidden="true" size={16} />
+                    <span>Set End Time</span>
+                  </button>
+                  {timerPanel === "end-time" && (
+                    <form
+                      className="classroom-timer-input-row"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void startTimer({ mode: "countdown", endTime: timerEndTimeInput });
+                      }}
+                    >
+                      <input
+                        aria-label="Timer end time"
+                        onChange={(event) => setTimerEndTimeInput(event.target.value)}
+                        required
+                        type="time"
+                        value={timerEndTimeInput}
+                      />
+                      <button className="classroom-timer-start-button" disabled={timerBusy} type="submit">
+                        Start
+                      </button>
+                    </form>
+                  )}
+                  <button
+                    aria-expanded={timerPanel === "custom"}
+                    className="classroom-timer-option"
+                    onClick={() => setTimerPanel((current) => current === "custom" ? null : "custom")}
+                    type="button"
+                  >
+                    <Settings aria-hidden="true" size={16} />
+                    <span>Set Custom Time</span>
+                  </button>
+                  {timerPanel === "custom" && (
+                    <form
+                      className="classroom-timer-input-row"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        const durationMinutes = Number(timerCustomMinutes);
+                        if (Number.isInteger(durationMinutes) && durationMinutes >= 1 && durationMinutes <= 600) {
+                          void startTimer({ mode: "countdown", durationMinutes });
+                        }
+                      }}
+                    >
+                      <input
+                        aria-label="Custom timer minutes"
+                        inputMode="numeric"
+                        max="600"
+                        min="1"
+                        onChange={(event) => setTimerCustomMinutes(event.target.value)}
+                        required
+                        type="number"
+                        value={timerCustomMinutes}
+                      />
+                      <button className="classroom-timer-start-button" disabled={timerBusy} type="submit">
+                        Start
+                      </button>
+                    </form>
+                  )}
+                  <button
+                    className="classroom-timer-option"
+                    disabled={timerBusy}
+                    onClick={() => void startTimer({ mode: "stopwatch" })}
+                    type="button"
+                  >
+                    <Play aria-hidden="true" size={16} />
+                    <span>Stopwatch</span>
+                  </button>
+                </>
+              ) : !timer ? (
+                <p className="classroom-timer-empty">No timer is running.</p>
+              ) : null}
+            </section>
+          )}
+        </div>
         {isHostClassRole && (
           <div className="classroom-invite-menu" ref={inviteMenuRef}>
             <button
@@ -3068,6 +3590,12 @@ function RoomTestControls({
           )}
         </div>
       </header>
+
+      {timerToast && (
+        <div aria-live="assertive" className="classroom-timer-toast" role="status">
+          {timerToast}
+        </div>
+      )}
 
       {announcementBanner && (
         <div aria-live="polite" className="classroom-announcement-banner" role="status">
@@ -3487,7 +4015,7 @@ function RoomTestControls({
                     {[0, 1, 2].map((row) => <i key={row} />)}
                   </div>
                 ) : isHostClassRole ? (
-                  hostParticipants.map((participant, index) => {
+                  orderedHostParticipants.map((participant, index) => {
                     const isYou = participant.id === localParticipant.identity;
                     const liveParticipant = participants.find(
                       (person) => person.identity === participant.id,
@@ -3514,6 +4042,23 @@ function RoomTestControls({
                             {cameraOff ? " · Camera off" : ""}
                           </span>
                         </span>
+                        {handRaisedAtById[participant.id] && (
+                          <>
+                            <span aria-label="Hand raised" className="person-hand-icon" role="img">
+                              <Hand aria-hidden="true" size={14} />
+                            </span>
+                            {!isYou && (
+                              <button
+                                aria-label={`Lower ${participant.name}'s hand`}
+                                className="lower-hand-button"
+                                onClick={() => void lowerParticipantHand(participant)}
+                                type="button"
+                              >
+                                Lower
+                              </button>
+                            )}
+                          </>
+                        )}
                         {!isYou && (
                           <button
                             aria-expanded={personMenuId === participant.id}
@@ -3577,7 +4122,7 @@ function RoomTestControls({
                     );
                   })
                 ) : (
-                  visibleParticipants.map((participant, index) => {
+                  orderedVisibleParticipants.map((participant, index) => {
                     const isYou = participant.identity === localParticipant.identity;
                     const role = readParticipantRole(participant) ?? (isYou ? classRole : null);
                     const name = participant.name || participant.identity;
@@ -3620,7 +4165,7 @@ function RoomTestControls({
                 )}
               </header>
               <div className={`classroom-video-grid ${layout === "sidebar" ? "single-column" : ""}`}>
-                {visibleParticipants.map((participant, index) => {
+                {orderedVisibleParticipants.map((participant, index) => {
                   const isYou = participant.identity === localParticipant.identity;
                   const role = readParticipantRole(participant) ?? (isYou ? classRole : null);
                   const name = participant.name || participant.identity;
@@ -3650,6 +4195,16 @@ function RoomTestControls({
                       ) : (
                         <span className={`classroom-tile-avatar avatar-color-${index % 4}`}>{getInitials(name)}</span>
                       )}
+                                            {handRaisedAtById[participant.identity] && (
+                        <span aria-label="Hand raised" className="tile-hand-badge" role="img" title="Hand raised">✋</span>
+                      )}
+                      {floatingReactions
+                        .filter((reaction) => reaction.participantId === participant.identity)
+                        .map((reaction) => (
+                          <span aria-hidden="true" className="floating-reaction" key={reaction.id}>
+                            {reaction.emoji}
+                          </span>
+                        ))}
                       <div className="classroom-tile-footer">
                         <span>{name}{isYou ? " (you)" : ""}</span>
                         {role === "guest" && <em>Guest</em>}
@@ -3861,8 +4416,68 @@ function RoomTestControls({
           <button aria-label={isCameraEnabled ? "Turn camera off" : "Turn camera on"} className={isCameraEnabled ? "" : "control-off"} disabled={!canUseCamera} onClick={() => void toggleCamera()} title={!canPublish ? "Observers cannot publish" : !myPermissions.camera ? "Your tutor has turned this off" : (isCameraEnabled ? "Turn camera off" : "Turn camera on")} type="button">
             {isCameraEnabled ? <Video aria-hidden="true" size={17} /> : <CameraOff aria-hidden="true" size={17} />}
           </button>
-          <button aria-label="Raise hand" disabled title="Coming soon" type="button"><Hand aria-hidden="true" size={17} /></button>
-          <button aria-label="Reactions" disabled title="Coming soon" type="button"><Smile aria-hidden="true" size={17} /></button>
+          <button
+            aria-label={myHandRaised ? "Lower hand" : "Raise hand"}
+            aria-pressed={myHandRaised}
+            className={myHandRaised ? "selected" : ""}
+            disabled={!canUseHand}
+            onClick={() => void toggleRaisedHand()}
+            title={
+              classRole === "observer"
+                ? "Observers cannot raise a hand"
+                : !myPermissions.raiseHand && !myHandRaised
+                  ? "Your tutor has turned this off"
+                  : myHandRaised ? "Lower hand" : "Raise hand"
+            }
+            type="button"
+          >
+            <Hand aria-hidden="true" size={17} />
+          </button>
+          <button
+            aria-expanded={reactionPopoverOpen}
+            aria-label="Reactions"
+            className={reactionPopoverOpen ? "selected" : ""}
+            disabled={!canUseReactions}
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              setReactionAnchor({
+                top: rect.top + rect.height / 2,
+                right: window.innerWidth - rect.left + 10,
+              });
+              setReactionPopoverOpen((open) => !open);
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
+            title={
+              classRole === "observer"
+                ? "Observers cannot send reactions"
+                : !myPermissions.reactions
+                  ? "Your tutor has turned this off"
+                  : "Reactions"
+            }
+            type="button"
+          >
+            <Smile aria-hidden="true" size={17} />
+          </button>
+          {reactionPopoverOpen && (
+            <div
+              className="reaction-popover"
+              ref={reactionPopoverRef}
+              role="menu"
+              style={{ top: reactionAnchor.top, right: reactionAnchor.right }}
+            >
+              {reactionEmojis.map((emoji) => (
+                <button
+                  aria-label={`Send ${emoji}`}
+                  key={emoji}
+                  onClick={() => void sendReaction(emoji)}
+                  role="menuitem"
+                  type="button"
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
+          )}
           <button aria-label={peopleOpen ? "Close people panel" : "Open people panel"} className={peopleOpen ? "selected" : ""} onClick={() => {
             setChatOpen(false);
             setPeopleOpen((open) => !open);

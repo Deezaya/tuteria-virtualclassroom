@@ -67,6 +67,7 @@ model Session {
   startedAt    DateTime      @default(now())
   endedAt      DateTime?
   endedBy      String?       @db.Uuid
+  timer        Json?
   defaultPermissions Json    @default("{\"editing\":true,\"microphone\":true,\"camera\":true,\"screenShare\":true,\"raiseHand\":true,\"reactions\":true,\"chat\":true,\"fileUploads\":true}")
   participants Participant[]
   chatMessages  ChatMessage[]

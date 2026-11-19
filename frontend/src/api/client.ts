@@ -320,6 +320,62 @@ export type ChatMessage = {
   createdAt: string;
 };
 
+export type SessionTimer = {
+  mode: "countdown" | "stopwatch";
+  startedAt: string;
+  endsAt: string | null;
+  label: string;
+};
+
+export type SessionTimerSnapshot = {
+  timer: SessionTimer | null;
+  serverNow: string;
+};
+
+export function getSessionTimer(sessionId: string): Promise<SessionTimerSnapshot> {
+  return request<SessionTimerSnapshot>(`/sessions/${encodeURIComponent(sessionId)}/timer`);
+}
+
+export function startSessionTimer(
+  sessionId: string,
+  timer:
+    | { mode: "countdown"; durationMinutes: number }
+    | { mode: "countdown"; endTime: string }
+    | { mode: "stopwatch" },
+): Promise<SessionTimerSnapshot> {
+  return request<SessionTimerSnapshot>(`/sessions/${encodeURIComponent(sessionId)}/timer`, {
+    method: "POST",
+    body: JSON.stringify(timer),
+  });
+}
+
+export function stopSessionTimer(sessionId: string): Promise<SessionTimerSnapshot> {
+  return request<SessionTimerSnapshot>(`/sessions/${encodeURIComponent(sessionId)}/timer`, {
+    method: "DELETE",
+  });
+}
+
+export function updateRaisedHand(
+  sessionId: string,
+  raised: boolean,
+  participantId?: string,
+): Promise<{ participantId: string; raised: boolean; raisedAt: string | null }> {
+  return request<{ participantId: string; raised: boolean; raisedAt: string | null }>(
+    `/sessions/${encodeURIComponent(sessionId)}/hand`,
+    {
+      method: "POST",
+      body: JSON.stringify({ raised, ...(participantId ? { participantId } : {}) }),
+    },
+  );
+}
+
+export function sendSessionReaction(sessionId: string, emoji: string): Promise<{ message: string }> {
+  return request<{ message: string }>(`/sessions/${encodeURIComponent(sessionId)}/reactions`, {
+    method: "POST",
+    body: JSON.stringify({ emoji }),
+  });
+}
+
 export function getChatMessages(
   sessionId: string,
   before?: string,

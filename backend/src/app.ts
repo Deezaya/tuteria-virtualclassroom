@@ -15,6 +15,7 @@ import { inviteRoutes } from "./modules/invites/routes.js";
 import { joinRoutes } from "./modules/join/routes.js";
 import { livekitRoutes } from "./modules/livekit/routes.js";
 import { sessionRoutes } from "./modules/sessions/routes.js";
+import { sessionFeatureRoutes } from "./modules/session-features/routes.js";
 import { spaceRoutes } from "./modules/spaces/routes.js";
 import { registerAuthDecorators } from "./plugins/auth.js";
 
@@ -101,6 +102,7 @@ export function buildApp() {
   app.register(breakoutRoutes);
   app.register(chatRoutes);
   app.register(sessionRoutes);
+  app.register(sessionFeatureRoutes);
 
   app.get(
     "/health",

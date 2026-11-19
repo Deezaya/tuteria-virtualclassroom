@@ -5126,3 +5126,304 @@ a {
     width: min(270px, calc(100vw - 20px));
   }
 }
+
+.tile-hand-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 3;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 4px 12px rgba(20, 33, 61, 0.25);
+  font-size: 16px;
+  color: #14213d;
+  line-height: 1
+}
+
+.person-hand-icon {
+  display: inline-grid;
+  place-items: center;
+  margin-left: 6px;
+  font-size: 14px;
+}
+
+.lower-hand-button {
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid #dce4ef;
+  border-radius: 999px;
+  background: #fff;
+  color: #20385e;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.lower-hand-button:hover {
+  background: #f3f6fc;
+}
+
+.floating-reaction {
+  position: absolute;
+  bottom: 30px;
+  left: 50%;
+  z-index: 4;
+  font-size: 22px;
+  pointer-events: none;
+  animation: reaction-float 2.4s ease-out forwards;
+}
+
+@keyframes reaction-float {
+  0% { opacity: 0; transform: translate(-50%, 0) scale(0.6); }
+  15% { opacity: 1; transform: translate(-50%, -14px) scale(1.1); }
+  100% { opacity: 0; transform: translate(-50%, -60px) scale(1); }
+}
+
+.reaction-popover {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid #e5eaf2;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: var(--shadow-elevated);
+  transform: translateY(-50%);
+}
+
+.reaction-popover button {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+  font-size: 20px;
+}
+
+.reaction-popover button:hover {
+  background: #f3f6fc;
+}
+
+.classroom-timer-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.classroom-topbar-icon {
+  position: relative;
+}
+
+.classroom-topbar-icon.timer-running {
+  border-color: var(--brand-blue);
+  color: var(--brand-blue);
+}
+
+.classroom-topbar-icon.timer-running i {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--brand-success);
+}
+
+.classroom-timer-popup {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  width: min(280px, calc(100vw - 20px));
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid #dfe5ef;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 12px 32px rgba(16, 33, 67, 0.18);
+  color: #14213d;
+}
+
+.classroom-timer-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f3f6fc;
+}
+
+.classroom-timer-card > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.classroom-timer-card strong {
+  font-size: 11px;
+}
+
+.classroom-timer-card span {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+}
+
+.classroom-timer-card button {
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--brand-error);
+  color: #fff;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.classroom-timer-section-label {
+  color: #7785a0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+}
+
+.classroom-timer-quick-durations {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.classroom-timer-quick-durations button {
+  min-height: 34px;
+  border: 1px solid #dce4ef;
+  border-radius: 10px;
+  background: #fff;
+  color: #20385e;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.classroom-timer-quick-durations button:hover:not(:disabled) {
+  background: #f3f6fc;
+}
+
+.classroom-timer-divider {
+  height: 1px;
+  background: #e8edf4;
+}
+
+.classroom-timer-option {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #20385e;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.classroom-timer-option:hover:not(:disabled) {
+  background: #f3f6fc;
+}
+
+.classroom-timer-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.classroom-timer-input-row input {
+  min-width: 0;
+  flex: 1;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid #dce4ef;
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.classroom-timer-start-button {
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--brand-blue);
+  color: #fff;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.classroom-timer-empty {
+  margin: 0;
+  color: #647493;
+  font-size: 12px;
+}
+
+.classroom-timer-toast {
+  position: fixed;
+  top: 84px;
+  left: 50%;
+  z-index: 60;
+  padding: 11px 18px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: #14213d;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: var(--shadow-elevated);
+}
+
+.classroom-board-pdf-error {
+  position: absolute;
+  top: 46px;
+  right: 14px;
+  z-index: 3;
+  padding: 5px 9px;
+  border-radius: 8px;
+  background: #fde9e9;
+  color: #b52e35;
+  font-size: 11px;
+}
+
+.classroom-board-pdf-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.classroom-board-pdf-icon {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 1px solid #dfe5ef;
+  border-radius: 10px;
+  background: #fff;
+  color: #20385e;
+  cursor: pointer;
+}
+
+.classroom-board-pdf-icon:hover:not(:disabled) {
+  background: #f3f6fc;
+}
+
+.classroom-board-pdf-icon:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}

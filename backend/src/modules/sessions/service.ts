@@ -198,6 +198,11 @@ export async function endSession(
     if (updateSession.count === 0) {
       return { kind: "already-ended" as const };
     }
+    await transaction.$executeRaw`
+      UPDATE "sessions"
+      SET "timer" = NULL
+      WHERE "id" = ${sessionId}::uuid
+    `;
 
     await transaction.participant.updateMany({
       where: {

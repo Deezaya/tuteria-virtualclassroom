@@ -135,15 +135,17 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       let active = false;
       let closed = false;
       let sessionEnded = false;
-      const queuedEvents: Array<{ type: "session-ended" }> = [];
+      const queuedEvents: Array<import("../join/events.js").SessionEvent> = [];
       const raw = reply.raw;
       let keepAlive: ReturnType<typeof setInterval> | null = null;
-      const sendEvent = (event: { type: "session-ended" }) => {
+      const sendEvent = (event: import("../join/events.js").SessionEvent) => {
         if (active && !raw.destroyed) {
           raw.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
-          sessionEnded = true;
-          cleanup();
-          raw.end();
+          if (event.type === "session-ended") {
+            sessionEnded = true;
+            cleanup();
+            raw.end();
+          }
         } else {
           queuedEvents.push(event);
         }
