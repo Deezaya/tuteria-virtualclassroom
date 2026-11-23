@@ -82,8 +82,9 @@ export const boardRoutes: FastifyPluginAsync = async (app) => {
               token: { type: "string" },
               documentName: { type: "string" },
               expiresIn: { type: "integer" },
+              participantId: { type: "string", format: "uuid" },
             },
-            required: ["token", "documentName", "expiresIn"],
+            required: ["token", "documentName", "expiresIn", "participantId"],
           },
           400: errorResponse,
           401: errorResponse,
@@ -148,17 +149,26 @@ export const boardRoutes: FastifyPluginAsync = async (app) => {
         {
           sub: participant.id,
           classRole: participant.classRole,
+          // Hosts can always draw on their own board. Spy views and observers
+          // are always read-only.
           editing:
             !spy &&
             participant.classRole !== "observer" &&
-            readPermissions(participant.permissions).editing,
+            (participant.classRole === "admin" ||
+              participant.classRole === "tutor" ||
+              readPermissions(participant.permissions).editing),
           spy,
           documentName,
         },
         { expiresIn: "10m" },
       );
 
-      return reply.send({ token, documentName, expiresIn: 600 });
+      return reply.send({
+        token,
+        documentName,
+        expiresIn: 600,
+        participantId: participant.id,
+      });
     },
   );
 };

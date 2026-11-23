@@ -31,7 +31,7 @@ const boardWsUrl = boardSocketUrl.toString();
  */
 export type BoardBinding = {
   /** Called with the new document, before the provider is created. */
-  attach(doc: Y.Doc): void;
+  attach(doc: Y.Doc, session: BoardSession): void;
   /** Called on every awareness change. */
   onAwarenessChange(): void;
   /** Called once the provider is created, and again each time it syncs. */
@@ -40,6 +40,11 @@ export type BoardBinding = {
   detach(): void;
   /** Called last when disconnecting, after the provider and document are destroyed. */
   release(): void;
+};
+
+export type BoardSession = {
+  documentName: string;
+  participantId: string;
 };
 
 export type BoardBindingContext = {
@@ -107,7 +112,10 @@ export function useBoardConnection(
 
         doc = new Y.Doc();
         docRef.current = doc;
-        binding.attach(doc);
+        binding.attach(doc, {
+          documentName: credentials.documentName,
+          participantId: credentials.participantId,
+        });
 
         provider = new HocuspocusProvider({
           url: boardWsUrl,

@@ -133,11 +133,13 @@ export function getBoardToken(
   token: string;
   documentName: string;
   expiresIn: number;
+  participantId: string;
 }> {
   return request<{
     token: string;
     documentName: string;
     expiresIn: number;
+    participantId: string;
   }>(`/boards/${encodeURIComponent(sessionId)}/token`, {
     method: "POST",
     body: JSON.stringify(options),

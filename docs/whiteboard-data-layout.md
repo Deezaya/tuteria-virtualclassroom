@@ -1,7 +1,8 @@
 # Whiteboard data layout (version 2)
 
-Status: agreed design, written in Phase 0. Phase 1 builds it. Nothing here is live yet. The current
-Excalidraw board (version 1) runs until switch-over.
+Status: Phase 1 implements `meta`, `items` (the `stroke` type only) and awareness `user` and `cursor`,
+behind `VITE_BOARD_ENGINE=tuteria`. Code: `frontend/src/board/model/`. The other item types and
+`assets` come in Phases 2 and 3. The Excalidraw board (version 1) stays the default until switch-over.
 
 ## Decisions this layout follows
 
@@ -69,13 +70,14 @@ item (one moves it, one changes its colour) then merge instead of one overwritin
 | `type` | string | One of the types below |
 | `x`, `y` | number | |
 | `rotation` | number | Default `0` |
-| `z` | string | Fractional index. Sort with plain `<` comparison, not `localeCompare`. |
-| `createdBy` | string | Participant id. How the client learns it is settled in Phase 1. |
+| `z` | string | Fractional index. Sort with plain `<` comparison, not `localeCompare`. Two people adding at once can get the same key; ties sort by `id`. |
+| `createdBy` | string | Participant id, from the `participantId` field of the board token reply. |
 | `createdAt` | number | `Date.now()` |
 | `stroke` | string | Hex colour |
 | `fill` | string \| null | Hex colour, or none |
 | `strokeWidth` | number | World units |
 | `opacity` | number | 0 to 1 |
+| `locked` | boolean | Eraser, select and delete skip locked items. Phase 4 enforces this on the server with the locked layer. |
 
 ### Item types
 
@@ -124,6 +126,11 @@ JPEG quality 0.78, at most 20 pages per import.
 - Every local change runs inside `doc.transact(fn, LOCAL_ORIGIN)`.
 - `Y.UndoManager` watches `items`, with `trackedOrigins = { LOCAL_ORIGIN }`. Each person undoes only
   their own changes. Remote changes never enter local undo.
+- Undo steps follow gestures, not time. Every gesture calls `endStep()` when it starts and ends, so
+  one stroke, one erase or one move is exactly one step, however long it takes.
+- An abandoned gesture (a second finger turns a stroke into a pinch) is reverted and removed from
+  history with `discardStep()`.
+- Moves are written every 50 ms while dragging, so others see them live.
 
 ## Awareness (live presence, never saved)
 
