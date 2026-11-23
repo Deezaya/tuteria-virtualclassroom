@@ -11,6 +11,17 @@ type BoardContext = {
   classRole: string;
   documentName: string;
   editing: boolean;
+  /** Admins and tutors: always allowed to edit their own board. */
+  host: boolean;
+  /** Spy-mode view of another room's board: always read-only. */
+  spy: boolean;
+};
+
+type ConnectionEntry = {
+  connection: Connection<BoardContext>;
+  observer: boolean;
+  host: boolean;
+  spy: boolean;
 };
 
 type BoardTokenPayload = {
@@ -23,17 +34,19 @@ type BoardTokenPayload = {
 };
 
 const classRoles = new Set(["admin", "tutor", "student", "guest", "observer"]);
-const participantConnections = new Map<
-  string,
-  Set<{ connection: Connection<BoardContext>; observer: boolean }>
->();
+const participantConnections = new Map<string, Set<ConnectionEntry>>();
 
+/**
+ * Applies a change to a participant's Editing permission to their open
+ * board connections. Observers and spy views stay read-only and hosts stay
+ * writable, whatever the permission says.
+ */
 export function updateBoardParticipantEditing(
   participantId: string,
   editing: boolean,
 ): void {
   for (const entry of participantConnections.get(participantId) ?? []) {
-    entry.connection.readOnly = entry.observer || !editing;
+    entry.connection.readOnly = entry.observer || entry.spy || (!entry.host && !editing);
   }
 }
 
@@ -141,27 +154,34 @@ export function createBoardServer(app: FastifyInstance): void {
         !Array.isArray(participant.permissions)
           ? (participant.permissions as Record<string, unknown>)
           : {};
+      const host = payload.classRole === "admin" || payload.classRole === "tutor";
+      const spy = payload.spy === true;
       const editing =
         payload.editing !== false &&
+        !spy &&
         payload.classRole !== "observer" &&
-        (typeof storedPermissions.editing === "boolean"
-          ? storedPermissions.editing
-          : true);
+        (host ||
+          (typeof storedPermissions.editing === "boolean"
+            ? storedPermissions.editing
+            : true));
       connectionConfig.readOnly = !editing;
       return {
         participantId: payload.sub,
         classRole: payload.classRole,
         documentName: payload.documentName,
         editing,
+        host,
+        spy,
       };
     },
     async connected({ connection, context }) {
       const entries =
-        participantConnections.get(context.participantId) ??
-        new Set<{ connection: Connection<BoardContext>; observer: boolean }>();
-      const entry = {
+        participantConnections.get(context.participantId) ?? new Set<ConnectionEntry>();
+      const entry: ConnectionEntry = {
         connection,
         observer: context.classRole === "observer",
+        host: context.host,
+        spy: context.spy,
       };
       entries.add(entry);
       participantConnections.set(context.participantId, entries);

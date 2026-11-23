@@ -1769,7 +1769,7 @@ function RoomTestControls({
   const personMenuRef = useRef<HTMLDivElement>(null);
   const isHostClassRole = classRole === "admin" || classRole === "tutor";
   const canPublish = classRole !== "observer";
-  const canEditBoard = !spyRoomId && classRole !== "observer" && myPermissions.editing;
+  const canEditBoard = !spyRoomId && classRole !== "observer" && (isHostClassRole || myPermissions.editing);
   const canUseMicrophone = canPublish && myPermissions.microphone;
   const canUseCamera = canPublish && myPermissions.camera;
   const canUseScreenShare = canPublish && myPermissions.screenShare;
