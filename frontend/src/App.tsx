@@ -3854,6 +3854,7 @@ function RoomTestControls({
             <Suspense fallback={<div className="classroom-whiteboard-loading">Loading board…</div>}>
               <Whiteboard
                 canEdit={canEditBoard}
+                canUpload={canEditBoard && (isHostClassRole || myPermissions.fileUploads)}
                 classRole={classRole}
                 displayName={localParticipant.name || localParticipant.identity}
                 roomId={boardRoomId}

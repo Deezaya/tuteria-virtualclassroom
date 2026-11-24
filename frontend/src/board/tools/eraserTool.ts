@@ -1,12 +1,13 @@
-import { strokeHit, type Point } from "../engine/geometry";
+import type { Point } from "../engine/geometry";
+import { hitItem } from "../engine/items";
 import type { BoardPointer, Tool, ToolHost } from "./types";
 
 /** Eraser radius in screen pixels, so it feels the same at any zoom. */
 const RADIUS_PX = 10;
 
 /**
- * Drag over strokes to mark them; they fade while marked and are removed
- * together on release, as one undo step.
+ * Drag over items to mark them; they fade while marked and are removed
+ * together on release, as one undo step. Locked items are skipped.
  */
 export class EraserTool implements Tool {
   readonly id = "eraser" as const;
@@ -31,7 +32,7 @@ export class EraserTool implements Tool {
     this.hoverAt = pointer.screen;
     const last = this.last;
     if (last) {
-      // Sample the path between events so fast swipes don't skip strokes.
+      // Sample the path between events so fast swipes don't skip items.
       const step = RADIUS_PX / 2 / this.host.getCamera().zoom;
       const dx = pointer.world.x - last.x;
       const dy = pointer.world.y - last.y;
@@ -92,7 +93,7 @@ export class EraserTool implements Tool {
     const radius = RADIUS_PX / this.host.getCamera().zoom;
     for (const item of this.host.getItems()) {
       if (item.locked || this.marked.has(item.id)) continue;
-      if (strokeHit(item, world, radius, this.host.boundsOf(item))) this.marked.add(item.id);
+      if (hitItem(item, this.host.geometryOf(item), world, radius)) this.marked.add(item.id);
     }
   }
 }

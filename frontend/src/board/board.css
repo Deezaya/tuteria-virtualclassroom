@@ -1,15 +1,17 @@
 /*
  * Styles for the custom whiteboard (VITE_BOARD_ENGINE=tuteria).
- * Loaded only with that engine. Phase 2 restyles from these tokens.
+ * Loaded only with that engine. Colours follow the reference design.
  */
 .tb-board {
-  --tb-bar-bg: #27313d;
-  --tb-bar-fg: #e5eaf1;
-  --tb-bar-hover: #333e4c;
-  --tb-bar-active: #3d4959;
-  --tb-bar-separator: #3e4a59;
+  --tb-bar-bg: #2b3541;
+  --tb-bar-fg: #e9edf2;
+  --tb-bar-muted: #97a3b4;
+  --tb-bar-hover: #354150;
+  --tb-bar-active: #3d4a5b;
+  --tb-bar-separator: #404c5c;
   --tb-focus: #7fb0ff;
   --tb-stage-bg: #ffffff;
+  --tb-font: "Sora", system-ui, -apple-system, "Segoe UI", sans-serif;
 
   display: flex;
   position: relative;
@@ -17,15 +19,17 @@
   width: 100%;
   height: 100%;
   background: var(--tb-stage-bg);
+  font-family: var(--tb-font);
 }
+
+/* ---- toolbar ---- */
 
 .tb-toolbar {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 4px;
-  height: 52px;
-  padding: 0 12px;
+  height: 58px;
+  padding: 0 14px;
   overflow-x: auto;
   background: var(--tb-bar-bg);
   color: var(--tb-bar-fg);
@@ -40,27 +44,40 @@
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 2px;
-  padding: 0 8px;
-  border-left: 1px solid var(--tb-bar-separator);
+  gap: 4px;
+  padding: 0 10px;
+  position: relative;
+}
+
+.tb-group + .tb-group::before {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 1px;
+  height: 26px;
+  background: var(--tb-bar-separator);
+  content: "";
+  transform: translateY(-50%);
 }
 
 .tb-group:first-child {
   padding-left: 0;
-  border-left: 0;
 }
 
 .tb-button {
-  display: grid;
-  min-width: 36px;
-  height: 36px;
-  padding: 0 6px;
-  place-items: center;
+  display: inline-flex;
+  min-width: 38px;
+  height: 38px;
+  padding: 0 8px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 9px;
   background: transparent;
   color: inherit;
   cursor: pointer;
+  font: inherit;
 }
 
 .tb-button:hover:not(:disabled) {
@@ -77,18 +94,32 @@
   opacity: 0.4;
 }
 
-.tb-button:focus-visible {
+.tb-button:focus-visible,
+.tb-swatch:focus-visible,
+.tb-option:focus-visible,
+.tb-menu-item:focus-visible {
   outline: 2px solid var(--tb-focus);
-  outline-offset: -2px;
+  outline-offset: 1px;
+}
+
+.tb-color-ring {
+  display: block;
+  width: 24px;
+  height: 24px;
+  border: 3px solid;
+  border-radius: 50%;
 }
 
 .tb-zoom {
-  min-width: 54px;
-  font: 600 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  min-width: 78px;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .tb-spacer {
   flex: 1 1 auto;
+  min-width: 8px;
 }
 
 .tb-chip {
@@ -96,10 +127,12 @@
   flex: 0 0 auto;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
+  margin-left: 6px;
+  padding: 5px 11px;
   border-radius: 999px;
   background: var(--tb-bar-active);
   font-size: 12px;
+  font-weight: 600;
   white-space: nowrap;
 }
 
@@ -111,6 +144,140 @@
   background: #5c2328;
   color: #ffd7da;
 }
+
+/* ---- panels ---- */
+
+.tb-panel {
+  position: absolute;
+  z-index: 5;
+  min-width: 200px;
+  padding: 14px 16px 16px;
+  border-radius: 14px;
+  background: var(--tb-bar-bg);
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.32);
+  color: var(--tb-bar-fg);
+}
+
+.tb-panel-style {
+  width: 290px;
+}
+
+.tb-panel-label {
+  margin: 0 0 10px;
+  color: var(--tb-bar-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.tb-panel-label:not(:first-child) {
+  margin-top: 16px;
+}
+
+.tb-swatches {
+  display: grid;
+  grid-template-columns: repeat(6, 32px);
+  gap: 12px;
+}
+
+.tb-swatch {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--tb-bar-muted);
+  cursor: pointer;
+}
+
+.tb-swatch.is-ring {
+  border: 3px solid;
+}
+
+.tb-swatch.is-selected {
+  box-shadow: 0 0 0 2px var(--tb-bar-bg), 0 0 0 4px #ffffff;
+}
+
+.tb-options {
+  display: flex;
+  gap: 8px;
+}
+
+.tb-option {
+  display: grid;
+  min-width: 40px;
+  height: 36px;
+  place-items: center;
+  padding: 0 8px;
+  border: 1px solid var(--tb-bar-separator);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--tb-bar-fg);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tb-option:hover {
+  background: var(--tb-bar-hover);
+}
+
+.tb-option.is-selected {
+  border-color: #ffffff;
+  background: var(--tb-bar-active);
+}
+
+.tb-width-sample {
+  display: block;
+  width: 22px;
+  border-radius: 99px;
+  background: currentColor;
+}
+
+.tb-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: -6px -8px -8px;
+}
+
+.tb-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+
+.tb-menu-item span {
+  flex: 1 1 auto;
+}
+
+.tb-menu-item kbd {
+  color: var(--tb-bar-muted);
+  font: inherit;
+  font-size: 11px;
+}
+
+.tb-menu-item:hover,
+.tb-menu-item.is-active {
+  background: var(--tb-bar-active);
+}
+
+/* ---- stage ---- */
 
 .tb-stage {
   position: relative;
@@ -130,18 +297,44 @@
   -webkit-touch-callout: none;
 }
 
-.tb-banner {
+.tb-text-editor {
   position: absolute;
-  top: 12px;
-  left: 50%;
   z-index: 2;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  outline: 1.5px dashed rgba(0, 84, 229, 0.55);
+  outline-offset: 4px;
+  background: transparent;
+  resize: none;
+  caret-color: #0054e5;
+  letter-spacing: normal;
+}
+
+.tb-banner,
+.tb-notice {
+  position: absolute;
+  left: 50%;
+  z-index: 3;
   width: max-content;
   max-width: calc(100% - 32px);
-  padding: 8px 14px;
-  border: 1px solid #f3d9a4;
+  padding: 9px 15px;
   border-radius: 10px;
-  background: #fff7e6;
-  color: #7a4b00;
   font-size: 13px;
   transform: translateX(-50%);
+}
+
+.tb-banner {
+  top: 12px;
+  border: 1px solid #f3d9a4;
+  background: #fff7e6;
+  color: #7a4b00;
+}
+
+.tb-notice {
+  bottom: 16px;
+  background: #2b3541;
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.28);
+  color: #ffffff;
 }

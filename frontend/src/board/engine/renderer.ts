@@ -1,7 +1,8 @@
 import type { BoardItem } from "../model/schema";
 import { visibleWorldBounds, worldToScreen, type Camera } from "./camera";
 import { boundsIntersect, expandBounds, unionBounds, type Bounds, type Point } from "./geometry";
-import type { ItemCache } from "./itemCache";
+import { boxCorners, handlesFor } from "./handles";
+import { drawItem, type ItemGeometry } from "./items";
 
 export type RemoteCursor = {
   clientId: number;
@@ -11,30 +12,37 @@ export type RemoteCursor = {
   y: number;
 };
 
+/** A laser trail ready to draw: world points, oldest first. */
+export type LaserTrail = { points: Point[]; color: string; alpha: number };
+
 export type RenderInput = {
   camera: Camera;
   width: number;
   height: number;
   dpr: number;
   items: readonly BoardItem[];
-  cache: ItemCache;
-  versionOf: (id: string) => number;
-  positionOverride: (id: string) => Point | null;
+  geometryOf: (item: BoardItem, preview: boolean) => ItemGeometry;
+  /** Replacement for an item while a tool changes it (move, resize). */
+  override: (id: string) => BoardItem | null;
   hidden: ReadonlySet<string>;
   faded: ReadonlySet<string>;
   previews: readonly BoardItem[];
   selection: ReadonlySet<string>;
+  showHandles: boolean;
   cursors: readonly RemoteCursor[];
+  lasers: readonly LaserTrail[];
+  image: (assetId: string) => CanvasImageSource | null;
   /** Screen-space drawing by the active tool (marquee, eraser ring). */
   drawOverlay: (ctx: CanvasRenderingContext2D) => void;
 };
 
-/** Colours the engine draws with. Phase 2 can restyle these in one place. */
+/** Colours the engine draws with, in one place for restyling. */
 export const BOARD_COLORS = {
   background: "#ffffff",
-  grid: "#d7dfef",
+  grid: "#dde3ee",
   selection: "#0054e5",
   selectionFill: "rgba(0, 84, 229, 0.08)",
+  laser: "#ff2d2d",
 };
 
 const GRID_SPACING = 24;
@@ -53,55 +61,107 @@ function drawGrid(ctx: CanvasRenderingContext2D, camera: Camera, width: number, 
   ctx.fill();
 }
 
-function drawItem(
-  ctx: CanvasRenderingContext2D,
-  item: BoardItem,
-  path: Path2D,
-  bounds: Bounds,
-  offset: Point,
-  faded: boolean,
-) {
-  ctx.save();
-  ctx.translate(item.x + offset.x, item.y + offset.y);
-  if (item.rotation !== 0) {
-    const cx = (bounds.minX + bounds.maxX) / 2 - item.x;
-    const cy = (bounds.minY + bounds.maxY) / 2 - item.y;
-    ctx.translate(cx, cy);
-    ctx.rotate(item.rotation);
-    ctx.translate(-cx, -cy);
-  }
-  ctx.globalAlpha = item.opacity * (faded ? 0.25 : 1);
-  ctx.strokeStyle = item.stroke;
-  ctx.lineWidth = item.strokeWidth;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.stroke(path);
-  ctx.restore();
+function screenBox(camera: Camera, b: Bounds, pad: number) {
+  const a = worldToScreen(camera, { x: b.minX, y: b.minY });
+  const c = worldToScreen(camera, { x: b.maxX, y: b.maxY });
+  return { x: a.x - pad, y: a.y - pad, w: c.x - a.x + pad * 2, h: c.y - a.y + pad * 2 };
 }
 
-function drawSelection(ctx: CanvasRenderingContext2D, camera: Camera, boxes: Bounds[]) {
-  if (boxes.length === 0) return;
-  const toScreen = (b: Bounds) => {
-    const a = worldToScreen(camera, { x: b.minX, y: b.minY });
-    const c = worldToScreen(camera, { x: b.maxX, y: b.maxY });
-    return { x: a.x - 4, y: a.y - 4, w: c.x - a.x + 8, h: c.y - a.y + 8 };
-  };
+function drawSelection(
+  ctx: CanvasRenderingContext2D,
+  camera: Camera,
+  selected: Array<{ item: BoardItem; geo: ItemGeometry }>,
+  showHandles: boolean,
+) {
+  if (selected.length === 0) return;
   ctx.save();
   ctx.strokeStyle = BOARD_COLORS.selection;
-  ctx.lineWidth = 1;
+  ctx.lineWidth = 1.5;
+
+  if (selected.length === 1) {
+    const { item, geo } = selected[0];
+    if (geo.box) {
+      const corners = boxCorners(geo.box).map((corner) => worldToScreen(camera, corner));
+      ctx.beginPath();
+      corners.forEach((corner, index) =>
+        index === 0 ? ctx.moveTo(corner.x, corner.y) : ctx.lineTo(corner.x, corner.y),
+      );
+      ctx.closePath();
+      ctx.stroke();
+    } else if (item.type !== "line" && item.type !== "arrow") {
+      const r = screenBox(camera, geo.bounds, 4);
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(r.x, r.y, r.w, r.h);
+      ctx.setLineDash([]);
+    }
+    if (showHandles) {
+      const handles = handlesFor(item, geo, camera);
+      const rotate = handles.find((handle) => handle.id === "rotate");
+      if (rotate && geo.box) {
+        const top = handles.find((handle) => handle.id === "n");
+        const corners = boxCorners(geo.box).map((corner) => worldToScreen(camera, corner));
+        const from = top ?? { x: (corners[0].x + corners[1].x) / 2, y: (corners[0].y + corners[1].y) / 2 };
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(rotate.x, rotate.y);
+        ctx.stroke();
+      }
+      for (const handle of handles) {
+        ctx.beginPath();
+        if (handle.id === "rotate" || handle.id === "start" || handle.id === "end") {
+          ctx.arc(handle.x, handle.y, 6, 0, Math.PI * 2);
+        } else {
+          ctx.rect(handle.x - 5, handle.y - 5, 10, 10);
+        }
+        ctx.fillStyle = "#ffffff";
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+    return;
+  }
+
   ctx.setLineDash([4, 3]);
-  for (const box of boxes) {
-    const r = toScreen(box);
+  for (const { geo } of selected) {
+    const r = screenBox(camera, geo.bounds, 4);
     ctx.strokeRect(r.x, r.y, r.w, r.h);
   }
   ctx.setLineDash([]);
-  if (boxes.length > 1) {
-    const all = unionBounds(boxes);
-    if (all) {
-      const r = toScreen(all);
-      ctx.strokeRect(r.x - 4, r.y - 4, r.w + 8, r.h + 8);
-    }
+  const all = unionBounds(selected.map(({ geo }) => geo.bounds));
+  if (all) {
+    const r = screenBox(camera, all, 8);
+    ctx.strokeRect(r.x, r.y, r.w, r.h);
   }
+  ctx.restore();
+}
+
+export function drawLaser(ctx: CanvasRenderingContext2D, camera: Camera, trail: LaserTrail) {
+  if (trail.points.length === 0 || trail.alpha <= 0) return;
+  const screen = trail.points.map((point) => worldToScreen(camera, point));
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = trail.color;
+  ctx.shadowColor = trail.color;
+  ctx.shadowBlur = 10;
+  const count = screen.length;
+  for (let i = 1; i < count; i += 1) {
+    // Older parts of the trail are thinner and fainter.
+    const t = i / count;
+    ctx.globalAlpha = trail.alpha * t;
+    ctx.lineWidth = 2 + 3 * t;
+    ctx.beginPath();
+    ctx.moveTo(screen[i - 1].x, screen[i - 1].y);
+    ctx.lineTo(screen[i].x, screen[i].y);
+    ctx.stroke();
+  }
+  const head = screen[count - 1];
+  ctx.globalAlpha = trail.alpha;
+  ctx.fillStyle = trail.color;
+  ctx.beginPath();
+  ctx.arc(head.x, head.y, 5, 0, Math.PI * 2);
+  ctx.fill();
   ctx.restore();
 }
 
@@ -123,29 +183,30 @@ function drawCursor(ctx: CanvasRenderingContext2D, camera: Camera, cursor: Remot
   ctx.lineWidth = 1.5;
   ctx.fill();
   ctx.stroke();
-  ctx.font = "600 11px system-ui, sans-serif";
+  ctx.font = '600 11px "Sora", system-ui, sans-serif';
   const label = cursor.name.length > 24 ? `${cursor.name.slice(0, 23)}…` : cursor.name;
-  const width = ctx.measureText(label).width + 12;
+  const width = ctx.measureText(label).width + 14;
   ctx.fillStyle = cursor.color;
   ctx.beginPath();
   // roundRect is missing on some older phone browsers.
-  if (typeof ctx.roundRect === "function") ctx.roundRect(12, 18, width, 18, 9);
-  else ctx.rect(12, 18, width, 18);
+  if (typeof ctx.roundRect === "function") ctx.roundRect(12, 18, width, 20, 10);
+  else ctx.rect(12, 18, width, 20);
   ctx.fill();
   ctx.fillStyle = "#ffffff";
-  ctx.fillText(label, 18, 31);
+  ctx.fillText(label, 19, 32);
   ctx.restore();
 }
 
 export function renderBoard(ctx: CanvasRenderingContext2D, input: RenderInput): void {
   const { camera, width, height, dpr } = input;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.globalCompositeOperation = "source-over";
   ctx.fillStyle = BOARD_COLORS.background;
   ctx.fillRect(0, 0, width, height);
   drawGrid(ctx, camera, width, height);
 
   const view = expandBounds(visibleWorldBounds(camera, width, height), 20 / camera.zoom);
-  const selectedBoxes: Bounds[] = [];
+  const selected: Array<{ item: BoardItem; geo: ItemGeometry }> = [];
   ctx.setTransform(
     dpr * camera.zoom,
     0,
@@ -155,29 +216,25 @@ export function renderBoard(ctx: CanvasRenderingContext2D, input: RenderInput): 
     -camera.y * camera.zoom * dpr,
   );
 
-  const zero = { x: 0, y: 0 };
-  const draw = (item: BoardItem, version: number | null) => {
-    const override = input.positionOverride(item.id);
-    const offset = override ? { x: override.x - item.x, y: override.y - item.y } : zero;
-    const entry = input.cache.get(item, version);
-    const bounds = {
-      minX: entry.bounds.minX + offset.x,
-      minY: entry.bounds.minY + offset.y,
-      maxX: entry.bounds.maxX + offset.x,
-      maxY: entry.bounds.maxY + offset.y,
-    };
-    if (input.selection.has(item.id)) selectedBoxes.push(bounds);
-    if (!boundsIntersect(bounds, view)) return;
-    drawItem(ctx, item, entry.path, entry.bounds, offset, input.faded.has(item.id));
+  const env = { faded: false, image: input.image };
+  const draw = (source: BoardItem, preview: boolean) => {
+    const override = preview ? null : input.override(source.id);
+    const item = override ?? source;
+    const geo = input.geometryOf(item, preview || override !== null);
+    if (!preview && input.selection.has(item.id)) selected.push({ item, geo });
+    if (!boundsIntersect(geo.bounds, view)) return;
+    env.faded = input.faded.has(item.id);
+    drawItem(ctx, item, geo, env);
   };
 
   for (const item of input.items) {
-    if (!input.hidden.has(item.id)) draw(item, input.versionOf(item.id));
+    if (!input.hidden.has(item.id)) draw(item, false);
   }
-  for (const preview of input.previews) draw(preview, null);
+  for (const preview of input.previews) draw(preview, true);
 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  drawSelection(ctx, camera, selectedBoxes);
+  drawSelection(ctx, camera, selected, input.showHandles);
   input.drawOverlay(ctx);
+  for (const trail of input.lasers) drawLaser(ctx, camera, trail);
   for (const cursor of input.cursors) drawCursor(ctx, camera, cursor);
 }

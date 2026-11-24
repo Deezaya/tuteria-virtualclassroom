@@ -1,5 +1,5 @@
 import type { Point } from "../engine/geometry";
-import type { StrokeItem } from "../model/schema";
+import type { StrokeItem, StrokeTool } from "../model/schema";
 import type { BoardPointer, PointerSample, Tool, ToolHost } from "./types";
 
 /** How often new points are sent while drawing. */
@@ -11,6 +11,9 @@ const FLUSH_MS = 32;
 const TOUCH_HOLD_MS = 60;
 /** Points closer than this many screen pixels to the last one are skipped. */
 const MIN_STEP_PX = 0.75;
+/** Stored for every point when the device gives no real pressure. */
+const NO_PRESSURE = 0.5;
+const HIGHLIGHTER_OPACITY = 0.45;
 
 type ActiveStroke = {
   id: string;
@@ -29,21 +32,30 @@ type ActiveStroke = {
 
 const round = (value: number) => Math.round(value * 100) / 100;
 
+/** Pen and highlighter: the same tool with a different look. */
 export class PenTool implements Tool {
-  readonly id = "pen" as const;
+  readonly id: "pen" | "highlighter";
   readonly cursor = "crosshair";
   readonly edits = true;
+  private readonly kind: StrokeTool;
   private active: ActiveStroke | null = null;
   private timer: number | null = null;
   private readonly hidden = new Set<string>();
 
-  constructor(private readonly host: ToolHost) {}
+  constructor(
+    private readonly host: ToolHost,
+    kind: StrokeTool,
+  ) {
+    this.kind = kind;
+    this.id = kind;
+  }
 
   down(pointer: BoardPointer): void {
     const model = this.host.getEditableModel();
     if (!model || this.active) return;
     model.endStep();
     const style = this.host.getStyle();
+    const highlighter = this.kind === "highlighter";
     this.active = {
       id: crypto.randomUUID(),
       origin: pointer.world,
@@ -52,8 +64,8 @@ export class PenTool implements Tool {
       created: false,
       startedAt: performance.now(),
       pointerType: pointer.pointerType,
-      stroke: style.stroke,
-      strokeWidth: style.strokeWidth,
+      stroke: highlighter ? style.highlighter : style.stroke,
+      strokeWidth: highlighter ? style.highlighterWidth : style.strokeWidth,
       createdAt: Date.now(),
     };
     this.hidden.clear();
@@ -116,9 +128,9 @@ export class PenTool implements Tool {
         stroke: active.stroke,
         fill: null,
         strokeWidth: active.strokeWidth,
-        opacity: 1,
+        opacity: this.kind === "highlighter" ? HIGHLIGHTER_OPACITY : 1,
         locked: false,
-        tool: "pen",
+        tool: this.kind,
         points: active.points,
         done: false,
       },
@@ -137,8 +149,11 @@ export class PenTool implements Tool {
       const min = MIN_STEP_PX / this.host.getCamera().zoom;
       if (dx * dx + dy * dy < min * min) return;
     }
-    // Mice report 0 or 0.5; store 0.5 so every stroke has a usable value.
-    const pressure = sample.pressure > 0 ? round(sample.pressure) : 0.5;
+    // Only styluses report real pressure; mice and fingers give fixed values.
+    const pressure =
+      this.kind === "pen" && active.pointerType === "pen" && sample.pressure > 0
+        ? round(sample.pressure)
+        : NO_PRESSURE;
     points.push(x, y, pressure);
   }
 
@@ -168,19 +183,23 @@ export class PenTool implements Tool {
         this.scheduleFlush();
         return;
       }
-      model.createStroke({
+      model.createItem({
         id: active.id,
+        type: "stroke",
         x: active.origin.x,
         y: active.origin.y,
-        tool: "pen",
+        rotation: 0,
         stroke: active.stroke,
+        fill: null,
         strokeWidth: active.strokeWidth,
-        opacity: 1,
+        opacity: this.kind === "highlighter" ? HIGHLIGHTER_OPACITY : 1,
+        locked: false,
+        tool: this.kind,
         points: active.points.slice(),
+        done,
       });
       active.created = true;
       active.sent = active.points.length;
-      if (done) model.appendStrokePoints(active.id, [], true);
       return;
     }
     model.appendStrokePoints(active.id, active.points.slice(active.sent), done);

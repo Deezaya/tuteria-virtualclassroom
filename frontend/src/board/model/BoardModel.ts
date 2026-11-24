@@ -3,13 +3,15 @@ import { isValidKey, keyBetween } from "./fractionalIndex";
 import {
   compareItems,
   LEGACY_ROOT_ELEMENTS,
+  readAsset,
   readItem,
+  ROOT_ASSETS,
   ROOT_ITEMS,
   ROOT_META,
   SCHEMA_VERSION,
+  type BoardAsset,
   type BoardItem,
   type ItemMap,
-  type StrokeTool,
 } from "./schema";
 
 /** Transaction origin for this client's own edits. Undo tracks only these. */
@@ -21,16 +23,13 @@ export const LOCAL_ORIGIN = { source: "local-board-edit" };
  */
 export type SchemaStatus = "pending" | "ok" | "legacy" | "newer";
 
-export type NewStroke = {
-  id: string;
-  x: number;
-  y: number;
-  tool: StrokeTool;
-  stroke: string;
-  strokeWidth: number;
-  opacity: number;
-  points: number[];
-};
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+/** An item as a tool creates it; the model fills in z, createdBy and createdAt. */
+export type NewItem = DistributiveOmit<BoardItem, "z" | "createdBy" | "createdAt">;
+export type ItemPatch = Record<string, unknown>;
+
+/** Keys a patch may never change. */
+const FIXED_KEYS = new Set(["id", "type", "z", "createdBy", "createdAt", "text"]);
 
 type Listener = () => void;
 
@@ -41,11 +40,12 @@ type Listener = () => void;
 export class BoardModel {
   readonly doc: Y.Doc;
   readonly undoManager: Y.UndoManager;
+  readonly participantId: string;
   private readonly meta: Y.Map<unknown>;
   private readonly items: Y.Map<ItemMap>;
-  private readonly participantId: string;
+  private readonly assets: Y.Map<Y.Map<unknown>>;
   private readonly cache = new Map<string, BoardItem>();
-  /** Bumped on every change; lets the renderer cache per-item paths. */
+  /** Bumped on every change; lets the renderer cache per-item geometry. */
   private readonly versions = new Map<string, number>();
   private sorted: BoardItem[] | null = null;
   private readonly listeners = new Set<Listener>();
@@ -53,6 +53,7 @@ export class BoardModel {
   private status: SchemaStatus = "pending";
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly onDeepChange: (events: Array<Y.YEvent<any>>) => void;
+  private readonly onAssetsChange: () => void;
   private readonly onHistoryChange: () => void;
 
   constructor(doc: Y.Doc, participantId: string) {
@@ -60,8 +61,9 @@ export class BoardModel {
     this.participantId = participantId;
     this.meta = doc.getMap(ROOT_META);
     this.items = doc.getMap<ItemMap>(ROOT_ITEMS);
-    // Gestures call stopCapturing() at their start and end, so one stroke or
-    // one move is exactly one undo step however long it takes.
+    this.assets = doc.getMap<Y.Map<unknown>>(ROOT_ASSETS);
+    // Gestures call endStep() at their start and end, so one stroke or one
+    // move is exactly one undo step however long it takes.
     this.undoManager = new Y.UndoManager(this.items, {
       captureTimeout: Number.MAX_SAFE_INTEGER,
       trackedOrigins: new Set([LOCAL_ORIGIN]),
@@ -81,6 +83,9 @@ export class BoardModel {
     };
     this.items.observeDeep(this.onDeepChange);
 
+    this.onAssetsChange = () => this.emit();
+    this.assets.observeDeep(this.onAssetsChange);
+
     this.onHistoryChange = () => this.historyListeners.forEach((listener) => listener());
     this.undoManager.on("stack-item-added", this.onHistoryChange);
     this.undoManager.on("stack-item-popped", this.onHistoryChange);
@@ -89,6 +94,7 @@ export class BoardModel {
 
   destroy(): void {
     this.items.unobserveDeep(this.onDeepChange);
+    this.assets.unobserveDeep(this.onAssetsChange);
     this.undoManager.destroy();
     this.listeners.clear();
     this.historyListeners.clear();
@@ -96,7 +102,7 @@ export class BoardModel {
 
   // ---- reading ----
 
-  /** Fires after any change to items, local or remote. */
+  /** Fires after any change to items or assets, local or remote. */
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -119,6 +125,11 @@ export class BoardModel {
   getSortedItems(): readonly BoardItem[] {
     if (!this.sorted) this.sorted = [...this.cache.values()].sort(compareItems);
     return this.sorted;
+  }
+
+  getAsset(id: string): BoardAsset | null {
+    const map = this.assets.get(id);
+    return map ? readAsset(id, map) : null;
   }
 
   getSchemaStatus(): SchemaStatus {
@@ -160,27 +171,25 @@ export class BoardModel {
     this.undoManager.stopCapturing();
   }
 
-  createStroke(stroke: NewStroke): void {
+  createItem(item: NewItem): void {
     const map = new Y.Map<unknown>();
-    const points = new Y.Array<number>();
-    points.push(stroke.points);
     this.doc.transact(() => {
-      map.set("type", "stroke");
-      map.set("x", stroke.x);
-      map.set("y", stroke.y);
-      map.set("rotation", 0);
+      for (const [key, value] of Object.entries(item)) {
+        if (key === "id" || value === undefined) continue;
+        if (key === "points" && item.type === "stroke") {
+          const points = new Y.Array<number>();
+          points.push(value as number[]);
+          map.set(key, points);
+        } else if (key === "text") {
+          map.set(key, new Y.Text(String(value)));
+        } else {
+          map.set(key, value);
+        }
+      }
       map.set("z", this.nextZ());
       map.set("createdBy", this.participantId);
       map.set("createdAt", Date.now());
-      map.set("stroke", stroke.stroke);
-      map.set("fill", null);
-      map.set("strokeWidth", stroke.strokeWidth);
-      map.set("opacity", stroke.opacity);
-      map.set("locked", false);
-      map.set("tool", stroke.tool);
-      map.set("points", points);
-      map.set("done", false);
-      this.items.set(stroke.id, map);
+      this.items.set(item.id, map);
     }, LOCAL_ORIGIN);
   }
 
@@ -195,21 +204,72 @@ export class BoardModel {
     }, LOCAL_ORIGIN);
   }
 
-  /** Sets new positions, all in one transaction. */
-  moveItems(positions: ReadonlyMap<string, { x: number; y: number }>): void {
+  updateItem(id: string, patch: ItemPatch): void {
+    this.updateItems(new Map([[id, patch]]));
+  }
+
+  /** Applies several patches in one transaction. Unchanged values are skipped. */
+  updateItems(patches: ReadonlyMap<string, ItemPatch>): void {
     this.doc.transact(() => {
-      for (const [id, { x, y }] of positions) {
+      for (const [id, patch] of patches) {
         const map = this.items.get(id);
         if (!map) continue;
-        if (map.get("x") !== x) map.set("x", x);
-        if (map.get("y") !== y) map.set("y", y);
+        const isStroke = map.get("type") === "stroke";
+        for (const [key, value] of Object.entries(patch)) {
+          if (FIXED_KEYS.has(key) || value === undefined) continue;
+          if (key === "points" && isStroke) continue;
+          const current = map.get(key);
+          if (Array.isArray(value) && Array.isArray(current) && sameNumbers(value, current)) continue;
+          if (current !== value) map.set(key, value);
+        }
       }
+    }, LOCAL_ORIGIN);
+  }
+
+  /** Sets new positions, all in one transaction. */
+  moveItems(positions: ReadonlyMap<string, { x: number; y: number }>): void {
+    this.updateItems(positions as ReadonlyMap<string, ItemPatch>);
+  }
+
+  /**
+   * Replaces a text item's text with the smallest edit that gets there, so
+   * someone else typing in another part of the same text is not lost.
+   */
+  setText(id: string, value: string): void {
+    const text = this.items.get(id)?.get("text");
+    if (!(text instanceof Y.Text)) return;
+    const current = text.toString();
+    if (current === value) return;
+    let start = 0;
+    while (start < current.length && start < value.length && current[start] === value[start]) {
+      start += 1;
+    }
+    let endCurrent = current.length;
+    let endValue = value.length;
+    while (endCurrent > start && endValue > start && current[endCurrent - 1] === value[endValue - 1]) {
+      endCurrent -= 1;
+      endValue -= 1;
+    }
+    this.doc.transact(() => {
+      if (endCurrent > start) text.delete(start, endCurrent - start);
+      if (endValue > start) text.insert(start, value.slice(start, endValue));
     }, LOCAL_ORIGIN);
   }
 
   deleteItems(ids: Iterable<string>): void {
     this.doc.transact(() => {
       for (const id of ids) this.items.delete(id);
+    }, LOCAL_ORIGIN);
+  }
+
+  addAsset(asset: Omit<BoardAsset, "createdBy">): void {
+    const map = new Y.Map<unknown>();
+    this.doc.transact(() => {
+      for (const [key, value] of Object.entries(asset)) {
+        if (key !== "id" && value !== undefined) map.set(key, value);
+      }
+      map.set("createdBy", this.participantId);
+      this.assets.set(asset.id, map);
     }, LOCAL_ORIGIN);
   }
 
@@ -255,4 +315,8 @@ export class BoardModel {
   private emit(): void {
     this.listeners.forEach((listener) => listener());
   }
+}
+
+function sameNumbers(a: unknown[], b: unknown[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
 }

@@ -1,8 +1,10 @@
 # Whiteboard data layout (version 2)
 
-Status: Phase 1 implements `meta`, `items` (the `stroke` type only) and awareness `user` and `cursor`,
-behind `VITE_BOARD_ENGINE=tuteria`. Code: `frontend/src/board/model/`. The other item types and
-`assets` come in Phases 2 and 3. The Excalidraw board (version 1) stays the default until switch-over.
+Status: Phase 2 implements `meta`, `assets` (images inline, see below) and every item type except
+`pdfPage`, plus awareness `user`, `color`, `cursor` and `laser`, behind `VITE_BOARD_ENGINE=tuteria`.
+Code: `frontend/src/board/model/` and, per item type, `frontend/src/board/engine/items.ts`.
+`pdfPage` and R2 storage come in Phase 3. The Excalidraw board (version 1) stays the default until
+switch-over.
 
 ## Decisions this layout follows
 
@@ -59,8 +61,11 @@ item (one moves it, one changes its colour) then merge instead of one overwritin
 
 - World units, origin top-left, y grows downward.
 - `x, y` is the item's top-left corner before rotation.
-- `rotation` is in radians, around the item's centre.
+- `rotation` is in radians, around the centre of the item's box. Only box items (`rect`, `ellipse`,
+  `text`, `image`) rotate. Strokes and lines keep `0`; a line is turned by moving its ends.
 - Points inside an item are relative to its `x, y`.
+- A text item's box size is not stored. It comes from laying out the text (`engine/textLayout.ts`):
+  the width is `w` when set, otherwise the widest line. The line height is `1.25 × fontSize`.
 
 ### Fields every item has
 
@@ -88,9 +93,37 @@ item (one moves it, one changes its colour) then merge instead of one overwritin
 | `line`, `arrow` | `points: number[]` `[x1, y1, x2, y2]`, `arrowStart: boolean`, `arrowEnd: boolean` |
 | `text` | `text: Y.Text`, `fontSize`, `fontFamily`, `align: "left" \| "center" \| "right"`, `w: number \| null` (wrap width) |
 | `image` | `assetId`, `w`, `h` |
-| `pdfPage` | `assetId`, `w`, `h`, `pdfName`, `pageNumber` |
+| `pdfPage` | `assetId`, `w`, `h`, `pdfName`, `pageNumber` (Phase 3) |
 
 From Phase 4, `pdfPage` items are written to the locked-layer document.
+
+A client skips item types it doesn't know, so an older client ignores newer types rather than
+breaking.
+
+### How each type looks
+
+| Type | Drawing |
+|---|---|
+| `stroke`, pen | Smoothed line. Pressure (0 to 1) changes the width from 0.35× to 1.65× `strokeWidth`. Only styluses record real pressure; mice and fingers store 0.5, which gives 1×. |
+| `stroke`, highlighter | Constant width, `opacity` 0.45, blended with "multiply" so writing shows through. |
+| `rect` | Slightly rounded corners. `fill` null means outline only. |
+| `ellipse` | Fills its box. |
+| `line`, `arrow` | Straight line; arrow heads are open chevrons, about 3.5× `strokeWidth` long. |
+| `text` | The Sora font, weight 500, in `stroke` colour. `strokeWidth` is unused (0). |
+| `image` | The asset, stretched to `w × h`. A grey placeholder until it loads. |
+
+### Defaults
+
+Pen `#1f2937`, width 4. Highlighter `#facc15`, width 20. Text 24. Shapes have no fill. The
+toolbar offers widths 2, 4, 8 and 14 (highlighter 12, 20, 32 and 48) and text sizes 16, 24, 36 and 56.
+
+### Live editing
+
+- Shapes are written as soon as the drag passes 3 screen pixels, then updated every 50 ms.
+- Resizing, rotating and moving line ends are written every 50 ms, like moves.
+- Typing goes straight into the item's `Y.Text` with the smallest possible change. Two people
+  typing in different parts of the same text both keep their changes. An edit session is one undo
+  step. A text box left empty is removed when the editor closes.
 
 ### Live drawing
 
@@ -113,10 +146,21 @@ the item back.
 | `width`, `height` | number | Pixel size of the stored image |
 | `bytes` | number | File size |
 | `url` | string | R2 location (Phase 3) |
-| `dataURL` | string | Temporary, Phases 1 and 2 only. Removed when R2 upload ships. |
+| `dataURL` | string | Temporary, Phase 2 only. Removed when R2 upload ships. |
 | `createdBy` | string | Participant id |
 
-Phase 3 also adds a cleanup job for assets that no item references.
+**Phase 2 (temporary):** images are stored inline as `dataURL`. Before saving, an image is shrunk to
+at most 1600 px on its long side and compressed: PNG when that keeps it under 1 MB, otherwise JPEG
+at quality 0.85, then 0.7, then 0.55. Anything still over 1 MB is refused with a message. Images
+come from the Upload button, from pasting (Ctrl+V) or from dropping a file on the board.
+
+Only people with editing **and** the File uploads permission can add images (tutors and admins
+always can). The client checks this. The server can't, because an image is just data inside the
+board, so a student with editing could in principle write one. Phase 3 closes this gap: the R2
+upload endpoint checks the permission, and the board stores only the URL.
+
+Assets are not part of undo. Undoing an image insert removes the image item and leaves its asset
+behind, unused. Phase 3 also adds a cleanup job for assets that no item references.
 
 PDF pages are drawn in the browser by `frontend/src/board/pdf/rasterizePdf.ts`: 1100 px wide,
 JPEG quality 0.78, at most 20 pages per import.
@@ -136,10 +180,10 @@ JPEG quality 0.78, at most 20 pages per import.
 
 | Field | Value | Phase |
 |---|---|---|
-| `user` | `{ name, role, color }`. Observers send nothing. | 1 (one colour per person: Phase 2) |
-| `cursor` | `{ x, y }` in world units, or `null`. Sent at most every 100 ms. | 1 |
-| `tool` | Current tool name | 2 |
-| `laser` | Recent trail `[x, y, time, …]` | 2 |
+| `user` | `{ name, role, color }`, set by the shared connection hook. Observers send nothing. The new board ignores `user.color`, which is the Excalidraw board's fixed blue. | 1 |
+| `color` | `#rrggbb`, this person's cursor colour. Picked from their participant id, so it stays the same when they reconnect. | 2 |
+| `cursor` | `{ x, y }` in world units, or `null`. Sent at most every 100 ms, only by people who can edit. | 1 |
+| `laser` | Flat `[x, y, …]` world points from the last 0.7 s, oldest first, or `null`. Sent at most every 50 ms while the laser is held down. When it becomes `null`, everyone's copy fades out over 0.6 s. Never saved. | 2 |
 | `viewport` | `{ x, y, zoom }`, reserved for Leading Mode | 5 |
 
 ## Permissions
