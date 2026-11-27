@@ -69,7 +69,7 @@ export const TOOLBAR: ToolbarEntry[][] = [
     },
     { kind: "tool", id: "text", label: "Text", shortcut: "T", icon: Type, edits: true },
     { kind: "tool", id: "laser", label: "Laser pointer", shortcut: "K", icon: CircleDot, edits: true },
-    { kind: "action", id: "upload", label: "Add image", icon: Upload },
+    { kind: "action", id: "upload", label: "Add PDF or image", icon: Upload },
   ],
   [
     { kind: "action", id: "undo", label: "Undo", shortcut: "Ctrl+Z", icon: Undo2 },

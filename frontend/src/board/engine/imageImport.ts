@@ -1,19 +1,19 @@
 /**
  * Prepares an image file for the board: shrinks it to at most 1600 px on
- * its long side and compresses it. Until R2 storage (Phase 3) the result is
- * stored inside the board, so it must stay under MAX_IMAGE_BYTES.
+ * its long side and compresses it, so it loads quickly on weak networks.
+ * The result is uploaded to storage; the board keeps only a reference.
  */
 export const MAX_IMAGE_SIDE = 1600;
-export const MAX_IMAGE_BYTES = 1_000_000;
+/** Must stay at or under the backend's limit for images (10 MB). */
+export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
 export class ImageImportError extends Error {}
 
 export type PreparedImage = {
-  dataURL: string;
+  blob: Blob;
   mime: string;
   width: number;
   height: number;
-  bytes: number;
 };
 
 async function decode(file: Blob): Promise<CanvasImageSource & { width: number; height: number }> {
@@ -35,9 +35,14 @@ async function decode(file: Blob): Promise<CanvasImageSource & { width: number; 
   }
 }
 
-function dataUrlBytes(dataURL: string): number {
-  const comma = dataURL.indexOf(",");
-  return Math.floor(((dataURL.length - comma - 1) * 3) / 4);
+export function canvasToBlob(canvas: HTMLCanvasElement, mime: string, quality?: number): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => (blob ? resolve(blob) : reject(new ImageImportError("Could not prepare that image."))),
+      mime,
+      quality,
+    );
+  });
 }
 
 export async function prepareImage(file: Blob): Promise<PreparedImage> {
@@ -59,25 +64,19 @@ export async function prepareImage(file: Blob): Promise<PreparedImage> {
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new ImageImportError("Could not read that image.");
 
-  // Keep transparency for PNG-like files when they fit; otherwise use JPEG.
+  // Keep transparency for PNG-like files when the result isn't too big.
   const mayHaveAlpha = file.type === "image/png" || file.type === "image/gif" || file.type === "image/webp";
   if (mayHaveAlpha) {
     ctx.drawImage(source, 0, 0, width, height);
-    const png = canvas.toDataURL("image/png");
-    if (dataUrlBytes(png) <= MAX_IMAGE_BYTES) {
-      return { dataURL: png, mime: "image/png", width, height, bytes: dataUrlBytes(png) };
-    }
+    const png = await canvasToBlob(canvas, "image/png");
+    if (png.size <= 2 * 1024 * 1024) return { blob: png, mime: "image/png", width, height };
   }
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, width, height);
   ctx.drawImage(source, 0, 0, width, height);
-  for (const quality of [0.85, 0.7, 0.55]) {
-    const jpeg = canvas.toDataURL("image/jpeg", quality);
-    if (dataUrlBytes(jpeg) <= MAX_IMAGE_BYTES) {
-      return { dataURL: jpeg, mime: "image/jpeg", width, height, bytes: dataUrlBytes(jpeg) };
-    }
+  for (const quality of [0.85, 0.7]) {
+    const jpeg = await canvasToBlob(canvas, "image/jpeg", quality);
+    if (jpeg.size <= MAX_IMAGE_BYTES) return { blob: jpeg, mime: "image/jpeg", width, height };
   }
-  throw new ImageImportError(
-    "This image is too large for now. Bigger images will work once file storage is added.",
-  );
+  throw new ImageImportError("That image is too large to add.");
 }

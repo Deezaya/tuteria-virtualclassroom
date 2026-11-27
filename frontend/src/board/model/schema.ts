@@ -67,11 +67,30 @@ export type TextItem = ItemBase & {
 
 export type ImageItem = ItemBase & { type: "image"; assetId: string; w: number; h: number };
 
-export type BoardItem = StrokeItem | RectItem | EllipseItem | LineItem | TextItem | ImageItem;
+/** One page of an imported PDF, stored as an image. */
+export type PdfPageItem = ItemBase & {
+  type: "pdfPage";
+  assetId: string;
+  w: number;
+  h: number;
+  /** Shared by every page of one import, so the whole PDF can be removed. */
+  pdfId: string;
+  pdfName: string;
+  pageNumber: number;
+};
+
+export type BoardItem =
+  | StrokeItem
+  | RectItem
+  | EllipseItem
+  | LineItem
+  | TextItem
+  | ImageItem
+  | PdfPageItem;
 export type ItemType = BoardItem["type"];
 
 /** Items with a box that can be resized and rotated. */
-export type BoxItem = RectItem | EllipseItem | TextItem | ImageItem;
+export type BoxItem = RectItem | EllipseItem | TextItem | ImageItem | PdfPageItem;
 
 export type BoardAsset = {
   id: string;
@@ -79,9 +98,11 @@ export type BoardAsset = {
   width: number;
   height: number;
   bytes: number;
-  /** R2 location (Phase 3). */
+  /** R2 object key. Viewing it needs a short-lived link from the backend. */
+  key: string | null;
+  /** Unused; kept so older documents still read. */
   url: string | null;
-  /** Temporary until Phase 3: the image itself, at most 1 MB. */
+  /** Phase 2 only: the image itself, inline. New images never use this. */
   dataURL: string | null;
   createdBy: string;
 };
@@ -172,12 +193,24 @@ export function readItem(id: string, map: ItemMap): BoardItem | null {
         w: num(map, "w", 1),
         h: num(map, "h", 1),
       };
+    case "pdfPage":
+      return {
+        ...base,
+        type,
+        assetId: str(map, "assetId", ""),
+        w: num(map, "w", 1),
+        h: num(map, "h", 1),
+        pdfId: str(map, "pdfId", ""),
+        pdfName: str(map, "pdfName", ""),
+        pageNumber: num(map, "pageNumber", 1),
+      };
     default:
       return null;
   }
 }
 
 export function readAsset(id: string, map: Y.Map<unknown>): BoardAsset {
+  const key = map.get("key");
   const url = map.get("url");
   const dataURL = map.get("dataURL");
   return {
@@ -186,6 +219,7 @@ export function readAsset(id: string, map: Y.Map<unknown>): BoardAsset {
     width: num(map, "width", 1),
     height: num(map, "height", 1),
     bytes: num(map, "bytes", 0),
+    key: typeof key === "string" ? key : null,
     url: typeof url === "string" ? url : null,
     dataURL: typeof dataURL === "string" ? dataURL : null,
     createdBy: str(map, "createdBy", ""),
@@ -193,7 +227,18 @@ export function readAsset(id: string, map: Y.Map<unknown>): BoardAsset {
 }
 
 export function isBoxItem(item: BoardItem): item is BoxItem {
-  return item.type === "rect" || item.type === "ellipse" || item.type === "text" || item.type === "image";
+  return (
+    item.type === "rect" ||
+    item.type === "ellipse" ||
+    item.type === "text" ||
+    item.type === "image" ||
+    item.type === "pdfPage"
+  );
+}
+
+/** Images and PDF pages: pictures that keep their shape when resized. */
+export function isPicture(item: BoardItem): item is ImageItem | PdfPageItem {
+  return item.type === "image" || item.type === "pdfPage";
 }
 
 /** Sort order for drawing: z key, then id so ties look the same everywhere. */

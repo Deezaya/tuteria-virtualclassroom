@@ -1,11 +1,13 @@
 import type { HocuspocusProvider } from "@hocuspocus/provider";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { BoardEngine, type EngineSnapshot, type RemoteLaser } from "./engine/BoardEngine";
 import type { Point } from "./engine/geometry";
 import { BOARD_COLORS, type RemoteCursor } from "./engine/renderer";
 import { BoardModel } from "./model/BoardModel";
+import { createAssetService } from "./sync/assetService";
 import { useBoardConnection } from "./sync/useBoardConnection";
 import type { BoardProps } from "./types";
+import { AddDialog } from "./ui/AddDialog";
 import { Toolbar } from "./ui/Toolbar";
 import "./board.css";
 
@@ -32,6 +34,7 @@ const INITIAL_SNAPSHOT: EngineSnapshot = {
   tool: "hand",
   editable: false,
   canUpload: false,
+  canAddPdf: false,
   canUndo: false,
   canRedo: false,
   zoom: 1,
@@ -108,6 +111,13 @@ export default function TuteriaWhiteboard({
   const modelRef = useRef<BoardModel | null>(null);
   const [engine, setEngine] = useState<BoardEngine | null>(null);
   const [notice, setNotice] = useState("");
+  /** The "Add to board" dialog, with a dropped file to start from. */
+  const [addDialog, setAddDialog] = useState<{ file: File | null } | null>(null);
+  const isHost = classRole === "admin" || classRole === "tutor";
+  const assets = useMemo(
+    () => createAssetService(sessionId, () => engineRef.current?.requestRender()),
+    [sessionId],
+  );
   const editable = canEdit && !spyMode;
   const editableRef = useRef(editable);
   editableRef.current = editable;
@@ -170,6 +180,8 @@ export default function TuteriaWhiteboard({
     const awareness = () => providerRef.current?.awareness;
 
     const instance = new BoardEngine(stage, canvas, {
+      assets,
+      onPdfDropped: (file) => setAddDialog({ file }),
       onCursorMove(world) {
         latestCursor = world;
         if (cursorTimer !== null) return;
@@ -211,7 +223,7 @@ export default function TuteriaWhiteboard({
       if (engineRef.current === instance) engineRef.current = null;
       setEngine(null);
     };
-  }, [providerRef]);
+  }, [assets, providerRef]);
 
   useEffect(() => {
     engine?.setEditable(editable);
@@ -224,6 +236,10 @@ export default function TuteriaWhiteboard({
   useEffect(() => {
     engine?.setCanUpload(canUpload);
   }, [canUpload, engine]);
+
+  useEffect(() => {
+    engine?.setHost(isHost);
+  }, [engine, isHost]);
 
   useEffect(() => {
     if (!notice) return;
@@ -245,7 +261,7 @@ export default function TuteriaWhiteboard({
         onStyle={(patch) => engine?.setStyle(patch)}
         onTool={(id) => engine?.setTool(id)}
         onUndo={() => engine?.undo()}
-        onUpload={(file) => void engine?.insertImage(file)}
+        onAdd={() => setAddDialog({ file: null })}
         onZoomFit={() => engine?.zoomToContent()}
         onZoomIn={() => engine?.zoomIn()}
         onZoomOut={() => engine?.zoomOut()}
@@ -279,6 +295,17 @@ export default function TuteriaWhiteboard({
           <div className="classroom-whiteboard-loading">Connecting to board…</div>
         ) : null}
       </div>
+      {addDialog && engine && (snapshot.canUpload || snapshot.canAddPdf) && (
+        <AddDialog
+          assets={assets}
+          canAddImage={snapshot.canUpload}
+          canAddPdf={snapshot.canAddPdf}
+          engine={engine}
+          initialFile={addDialog.file}
+          onClose={() => setAddDialog(null)}
+          onNotice={setNotice}
+        />
+      )}
     </div>
   );
 }

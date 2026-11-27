@@ -146,6 +146,30 @@ export function getBoardToken(
   });
 }
 
+export type BoardUploadKind = "image" | "pdf-page";
+
+/** Asks for a link to upload one board file straight to storage. */
+export function requestBoardUpload(
+  sessionId: string,
+  body: { kind: BoardUploadKind; contentType: string; bytes: number },
+): Promise<{ assetId: string; key: string; uploadUrl: string; expiresIn: number }> {
+  return request(`/boards/${encodeURIComponent(sessionId)}/uploads`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Short-lived links to view board files. Keys from another space are left out. */
+export function getBoardAssetUrls(
+  sessionId: string,
+  keys: string[],
+): Promise<{ urls: Record<string, string>; expiresIn: number }> {
+  return request(`/boards/${encodeURIComponent(sessionId)}/assets/urls`, {
+    method: "POST",
+    body: JSON.stringify({ keys }),
+  });
+}
+
 export type BreakoutPerson = {
   id: string;
   name: string;

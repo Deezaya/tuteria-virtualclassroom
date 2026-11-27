@@ -47,8 +47,10 @@ export interface ToolHost {
   getStyle(): DrawStyle;
   getSelection(): ReadonlySet<string>;
   setSelection(ids: Iterable<string>): void;
-  /** The top-most item within `radius` world units of `world`. */
-  hitTest(world: Point, radius: number): BoardItem | null;
+  /** The top-most item within `radius` world units of `world`, optionally filtered. */
+  hitTest(world: Point, radius: number, filter?: (item: BoardItem) => boolean): BoardItem | null;
+  /** False for locked items unless this person is a tutor or admin. */
+  canSelect(item: BoardItem): boolean;
   itemsTouching(bounds: Bounds): BoardItem[];
   geometryOf(item: BoardItem): ItemGeometry;
   getItem(id: string): BoardItem | undefined;

@@ -9,6 +9,7 @@ import swaggerUi from "@fastify/swagger-ui";
 import { config } from "./config.js";
 import { authRoutes } from "./modules/auth/routes.js";
 import { boardRoutes } from "./modules/boards/routes.js";
+import { boardUploadRoutes } from "./modules/boards/uploads.js";
 import { breakoutRoutes } from "./modules/breakouts/routes.js";
 import { chatRoutes } from "./modules/chat/routes.js";
 import { inviteRoutes } from "./modules/invites/routes.js";
@@ -99,6 +100,7 @@ export function buildApp() {
   app.register(joinRoutes);
   app.register(livekitRoutes);
   app.register(boardRoutes);
+  app.register(boardUploadRoutes);
   app.register(breakoutRoutes);
   app.register(chatRoutes);
   app.register(sessionRoutes);

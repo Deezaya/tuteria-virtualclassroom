@@ -34,7 +34,8 @@ type ToolbarProps = {
   onStyle(patch: StylePatch): void;
   onUndo(): void;
   onRedo(): void;
-  onUpload(file: File): void;
+  /** Opens the "Add to board" dialog. */
+  onAdd(): void;
   onZoomIn(): void;
   onZoomOut(): void;
   onZoomReset(): void;
@@ -59,7 +60,6 @@ export function Toolbar(props: ToolbarProps) {
   const [open, setOpen] = useState<{ id: PanelId; left: number; top: number } | null>(null);
   const anchors = useRef(new Map<PanelId, HTMLButtonElement>());
   const panelRef = useRef<HTMLDivElement>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -173,19 +173,13 @@ export function Toolbar(props: ToolbarProps) {
       }
       case "action": {
         const Icon = entry.icon;
+        const canAdd = snapshot.canUpload || snapshot.canAddPdf;
         const disabled =
-          entry.id === "undo"
-            ? !snapshot.canUndo
-            : entry.id === "redo"
-              ? !snapshot.canRedo
-              : !snapshot.canUpload;
+          entry.id === "undo" ? !snapshot.canUndo : entry.id === "redo" ? !snapshot.canRedo : !canAdd;
         const onClick =
-          entry.id === "undo"
-            ? props.onUndo
-            : entry.id === "redo"
-              ? props.onRedo
-              : () => fileRef.current?.click();
-        if (entry.id === "upload" && !snapshot.canUpload && snapshot.editable) return null;
+          entry.id === "undo" ? props.onUndo : entry.id === "redo" ? props.onRedo : props.onAdd;
+        // No upload permission at all: hide the button rather than show it disabled.
+        if (entry.id === "upload" && !canAdd && snapshot.editable) return null;
         return (
           <button
             aria-label={entry.label}
@@ -404,18 +398,6 @@ export function Toolbar(props: ToolbarProps) {
             {connection}
           </span>
         )}
-        <input
-          accept="image/*"
-          className="sr-only"
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            event.target.value = "";
-            if (file) props.onUpload(file);
-          }}
-          ref={fileRef}
-          tabIndex={-1}
-          type="file"
-        />
       </div>
       {open && (
         <div

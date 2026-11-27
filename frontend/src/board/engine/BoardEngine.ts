@@ -1,5 +1,6 @@
 import type { BoardModel, ItemPatch, SchemaStatus } from "../model/BoardModel";
-import { BOARD_FONT, type BoardItem } from "../model/schema";
+import { BOARD_FONT, isPicture, type BoardItem } from "../model/schema";
+import type { AssetService } from "../sync/assetService";
 import { EraserTool } from "../tools/eraserTool";
 import { HandTool } from "../tools/handTool";
 import { LaserTool } from "../tools/laserTool";
@@ -23,6 +24,7 @@ import { ImageStore } from "./imageStore";
 import { ItemCache } from "./itemCache";
 import { hitItem, itemTouchesBounds, type ItemGeometry } from "./items";
 import { renderBoard, type LaserTrail, type RemoteCursor } from "./renderer";
+import { SelectionBar } from "./selectionBar";
 import { TextEditor } from "./textEditor";
 import { clearTextLayouts, fontString } from "./textLayout";
 
@@ -30,6 +32,8 @@ export type EngineSnapshot = {
   tool: ToolId;
   editable: boolean;
   canUpload: boolean;
+  /** Tutors and admins who can edit, with storage available. */
+  canAddPdf: boolean;
   canUndo: boolean;
   canRedo: boolean;
   zoom: number;
@@ -52,13 +56,29 @@ export type StylePatch = Partial<{
 
 export type RemoteLaser = { clientId: number; points: Point[]; color: string };
 
+/**
+ * Where PDF pages go. "stack": below everything on the board, locked.
+ * "view": where the person is looking, movable.
+ */
+export type PdfPlacement = "stack" | "view";
+export type PdfPlacer = { next(aspect: number): { x: number; y: number; w: number; h: number } };
+export type UploadedPage = { assetId: string; key: string; mime: string; width: number; height: number; bytes: number };
+
+/** World width of a placed PDF page. */
+const PDF_PAGE_WIDTH = 800;
+const PDF_PAGE_GAP = 24;
+
 type EngineOptions = {
+  /** Board file storage (R2). Without it, images can't be added. */
+  assets?: AssetService;
   /** World position of this person's pointer, or null when it leaves. */
   onCursorMove?: (world: Point | null) => void;
   /** This person's laser trail, or null when it ends. */
   onLaser?: (points: Point[] | null) => void;
   /** A short message to show, e.g. an image that is too large. */
   onNotice?: (message: string) => void;
+  /** A PDF dropped on the board; the page opens the PDF dialog. */
+  onPdfDropped?: (file: File) => void;
 };
 
 type Gesture =
@@ -109,6 +129,7 @@ export class BoardEngine implements ToolHost {
   private readonly cache = new ItemCache();
   private readonly images: ImageStore;
   private readonly textEditor: TextEditor;
+  private readonly selectionBar: SelectionBar;
   private readonly listeners = new Set<() => void>();
   private readonly pointers = new Map<number, { screen: Point; type: string }>();
   private readonly cleanups: Array<() => void> = [];
@@ -121,6 +142,8 @@ export class BoardEngine implements ToolHost {
   private camera: Camera = { x: 0, y: 0, zoom: 1 };
   private allowedToEdit = false;
   private allowedToUpload = false;
+  /** Tutors and admins: may add PDFs and delete locked items. */
+  private host = false;
   private toolId: ToolId = "hand";
   /** The tool to return to when editing is allowed again. */
   private preferredTool: ToolId = "pen";
@@ -161,6 +184,10 @@ export class BoardEngine implements ToolHost {
         this.updateSnapshot();
         this.requestRender();
       },
+    });
+    this.selectionBar = new SelectionBar(container, {
+      onDelete: () => this.deleteSelection(),
+      onRemovePdf: () => this.removeSelectedPdf(),
     });
     this.tools = {
       select: new SelectTool(this),
@@ -219,6 +246,7 @@ export class BoardEngine implements ToolHost {
     this.destroyed = true;
     if (this.frame !== null) cancelAnimationFrame(this.frame);
     this.cleanups.forEach((cleanup) => cleanup());
+    this.selectionBar.destroy();
     this.listeners.clear();
   }
 
@@ -273,6 +301,13 @@ export class BoardEngine implements ToolHost {
     this.updateSnapshot();
   }
 
+  /** Whether this person is a tutor or admin. */
+  setHost(host: boolean): void {
+    this.host = host;
+    this.updateSnapshot();
+    this.requestRender();
+  }
+
   setTool(id: ToolId): void {
     if (this.tools[id].edits && !this.isEditable()) return;
     this.textEditor.end();
@@ -315,11 +350,11 @@ export class BoardEngine implements ToolHost {
         const item = model.getItem(id);
         if (!item || item.locked) continue;
         const itemPatch: ItemPatch = {};
-        if (patch.stroke !== undefined && item.type !== "image") itemPatch.stroke = patch.stroke;
+        if (patch.stroke !== undefined && !isPicture(item)) itemPatch.stroke = patch.stroke;
         if (patch.fill !== undefined && (item.type === "rect" || item.type === "ellipse")) {
           itemPatch.fill = patch.fill;
         }
-        if (patch.strokeWidth !== undefined && item.type !== "text" && item.type !== "image") {
+        if (patch.strokeWidth !== undefined && item.type !== "text" && !isPicture(item)) {
           itemPatch.strokeWidth = patch.strokeWidth;
         }
         if (patch.fontSize !== undefined && item.type === "text") itemPatch.fontSize = patch.fontSize;
@@ -382,31 +417,48 @@ export class BoardEngine implements ToolHost {
     const model = this.getEditableModel();
     if (!model || this.selection.size === 0) return;
     this.endGesture(true);
-    const ids = [...this.selection].filter((id) => !model.getItem(id)?.locked);
+    const ids = [...this.selection].filter((id) => {
+      const item = model.getItem(id);
+      return item !== undefined && this.canDelete(item);
+    });
     model.endStep();
     model.deleteItems(ids);
     model.endStep();
     this.setSelection([]);
   }
 
-  /** Adds an image to the board, centred on `at` or on the view. */
-  async insertImage(file: Blob, at?: Point): Promise<void> {
-    if (!this.getEditableModel()) return;
-    if (!this.allowedToUpload) {
-      this.options.onNotice?.("Your tutor hasn't allowed file uploads.");
-      return;
-    }
-    let prepared;
-    try {
-      prepared = await prepareImage(file);
-    } catch (error) {
-      this.options.onNotice?.(
-        error instanceof ImageImportError ? error.message : "Could not add that image.",
-      );
-      return;
-    }
+  /** Removes every page of the PDF the selected page came from (tutors and admins). */
+  removeSelectedPdf(): void {
     const model = this.getEditableModel();
-    if (!model || this.destroyed) return;
+    if (!model || !this.host) return;
+    const page = [...this.selection].map((id) => model.getItem(id)).find((item) => item?.type === "pdfPage");
+    if (page?.type !== "pdfPage" || !page.pdfId) return;
+    const ids = this.getItems()
+      .filter((item) => item.type === "pdfPage" && item.pdfId === page.pdfId)
+      .map((item) => item.id);
+    const name = page.pdfName || "this PDF";
+    if (!window.confirm(`Remove all ${ids.length} page${ids.length === 1 ? "" : "s"} of ${name}? You can undo this.`)) {
+      return;
+    }
+    this.endGesture(true);
+    model.endStep();
+    model.deleteItems(ids);
+    model.endStep();
+    this.setSelection([]);
+  }
+
+  /**
+   * Adds an image to the board, centred on `at` or on the view. The image
+   * is uploaded to storage first. Throws with a message fit to show people.
+   */
+  async insertImage(file: Blob, at?: Point, onProgress?: (fraction: number) => void): Promise<void> {
+    const assets = this.options.assets;
+    if (!this.getEditableModel() || !assets) throw new ImageImportError("You can't add images right now.");
+    if (!this.allowedToUpload) throw new ImageImportError("Your tutor hasn't allowed file uploads.");
+    const prepared = await prepareImage(file);
+    const { assetId, key } = await assets.upload(prepared.blob, "image", onProgress);
+    const model = this.getEditableModel();
+    if (!model || this.destroyed) throw new ImageImportError("Editing was turned off before the image was added.");
     const view = visibleWorldBounds(this.camera, this.width, this.height);
     const center = at ?? { x: (view.minX + view.maxX) / 2, y: (view.minY + view.maxY) / 2 };
     const fit = Math.min(
@@ -416,7 +468,6 @@ export class BoardEngine implements ToolHost {
     );
     const w = prepared.width * fit;
     const h = prepared.height * fit;
-    const assetId = crypto.randomUUID();
     const id = crypto.randomUUID();
     model.endStep();
     model.addAsset({
@@ -424,9 +475,10 @@ export class BoardEngine implements ToolHost {
       mime: prepared.mime,
       width: prepared.width,
       height: prepared.height,
-      bytes: prepared.bytes,
+      bytes: prepared.blob.size,
+      key,
       url: null,
-      dataURL: prepared.dataURL,
+      dataURL: null,
     });
     model.createItem({
       id,
@@ -446,6 +498,101 @@ export class BoardEngine implements ToolHost {
     model.endStep();
     this.setTool("select");
     this.setSelection([id]);
+  }
+
+  /** True when this person may add PDFs: tutors and admins who can edit. */
+  canAddPdf(): boolean {
+    return this.host && this.isEditable() && this.options.assets !== undefined;
+  }
+
+  /**
+   * Starts a PDF import: works out where each page goes. Pages are
+   * PDF_PAGE_WIDTH wide and stacked downwards with a small gap.
+   */
+  beginPdfImport(placement: PdfPlacement): PdfPlacer {
+    this.getEditableModel()?.endStep();
+    let x: number;
+    let y: number;
+    if (placement === "stack") {
+      const items = this.getItems();
+      if (items.length === 0) {
+        x = 0;
+        y = 0;
+      } else {
+        let minX = Infinity;
+        let maxY = -Infinity;
+        for (const item of items) {
+          const b = this.geometryOf(item).bounds;
+          minX = Math.min(minX, b.minX);
+          maxY = Math.max(maxY, b.maxY);
+        }
+        x = minX;
+        y = maxY + 60;
+      }
+    } else {
+      const view = visibleWorldBounds(this.camera, this.width, this.height);
+      x = (view.minX + view.maxX) / 2 - PDF_PAGE_WIDTH / 2;
+      y = view.minY + 40 / this.camera.zoom;
+    }
+    let first = true;
+    return {
+      next: (aspect) => {
+        const h = PDF_PAGE_WIDTH * aspect;
+        const area = { x, y, w: PDF_PAGE_WIDTH, h };
+        y += h + PDF_PAGE_GAP;
+        if (first) {
+          first = false;
+          // Show the first page so the tutor sees where the PDF went.
+          const zoom = clampZoom(Math.min(1, (this.width - 80) / PDF_PAGE_WIDTH));
+          this.setCamera({ x: area.x + PDF_PAGE_WIDTH / 2 - this.width / 2 / zoom, y: area.y - 40 / zoom, zoom });
+        }
+        return area;
+      },
+    };
+  }
+
+  /** Places one uploaded PDF page. Returns false if editing is no longer allowed. */
+  addPdfPage(
+    page: UploadedPage,
+    area: { x: number; y: number; w: number; h: number },
+    info: { pdfId: string; pdfName: string; pageNumber: number; locked: boolean },
+  ): boolean {
+    const model = this.getEditableModel();
+    if (!model || !this.host) return false;
+    model.addAsset({
+      id: page.assetId,
+      mime: page.mime,
+      width: page.width,
+      height: page.height,
+      bytes: page.bytes,
+      key: page.key,
+      url: null,
+      dataURL: null,
+    });
+    model.createItem({
+      id: crypto.randomUUID(),
+      type: "pdfPage",
+      x: area.x,
+      y: area.y,
+      rotation: 0,
+      stroke: "#000000",
+      fill: null,
+      strokeWidth: 0,
+      opacity: 1,
+      locked: info.locked,
+      assetId: page.assetId,
+      w: area.w,
+      h: area.h,
+      pdfId: info.pdfId,
+      pdfName: info.pdfName,
+      pageNumber: info.pageNumber,
+    });
+    return true;
+  }
+
+  /** Ends a PDF import, so the whole import is one undo step. */
+  endPdfImport(): void {
+    this.getEditableModel()?.endStep();
   }
 
   zoomIn(): void {
@@ -524,13 +671,23 @@ export class BoardEngine implements ToolHost {
     this.requestRender();
   }
 
-  hitTest(world: Point, radius: number): BoardItem | null {
+  hitTest(world: Point, radius: number, filter?: (item: BoardItem) => boolean): BoardItem | null {
     const items = this.getItems();
     for (let i = items.length - 1; i >= 0; i -= 1) {
       const item = items[i];
+      if (filter && !filter(item)) continue;
       if (hitItem(item, this.geometryOf(item), world, radius)) return item;
     }
     return null;
+  }
+
+  canSelect(item: BoardItem): boolean {
+    return !item.locked || this.host;
+  }
+
+  /** Locked items can only be deleted by tutors and admins. */
+  private canDelete(item: BoardItem): boolean {
+    return !item.locked || this.host;
   }
 
   itemsTouching(bounds: Bounds): BoardItem[] {
@@ -677,13 +834,64 @@ export class BoardEngine implements ToolHost {
       lasers,
       image: (assetId) => {
         const asset = model?.getAsset(assetId);
-        return this.images.get(assetId, asset?.url ?? asset?.dataURL ?? null);
+        if (!asset) return null;
+        // Stored files need a signed link; Phase 2 images are inline.
+        const src = asset.key ? (this.options.assets?.viewUrl(asset.key) ?? null) : asset.dataURL;
+        return this.images.get(assetId, src);
       },
       drawOverlay: (ctx) => tool.drawOverlay?.(ctx, this.camera),
     });
     this.textEditor.position();
+    this.updateSelectionBar();
     if (tool.isAnimating?.() || lasers.length > 0) this.requestRender();
   };
+
+  private updateSelectionBar(): void {
+    const model = this.model;
+    const visible =
+      model !== null &&
+      this.toolId === "select" &&
+      this.isEditable() &&
+      this.selection.size > 0 &&
+      this.gesture === null &&
+      this.textEditor.editingId === null;
+    if (!visible) {
+      this.selectionBar.update({ area: null, showRemovePdf: false, containerWidth: this.width });
+      return;
+    }
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let deletable = false;
+    let pdf = false;
+    for (const id of this.selection) {
+      const item = model.getItem(id);
+      if (!item) continue;
+      if (this.canDelete(item)) deletable = true;
+      if (item.type === "pdfPage" && item.pdfId) pdf = true;
+      const b = this.geometryOf(item).bounds;
+      minX = Math.min(minX, b.minX);
+      minY = Math.min(minY, b.minY);
+      maxX = Math.max(maxX, b.maxX);
+      maxY = Math.max(maxY, b.maxY);
+    }
+    if (!deletable || minX === Infinity) {
+      this.selectionBar.update({ area: null, showRemovePdf: false, containerWidth: this.width });
+      return;
+    }
+    const z = this.camera.zoom;
+    this.selectionBar.update({
+      area: {
+        x: (minX - this.camera.x) * z,
+        y: (minY - this.camera.y) * z,
+        w: (maxX - minX) * z,
+        h: (maxY - minY) * z,
+      },
+      showRemovePdf: pdf && this.host,
+      containerWidth: this.width,
+    });
+  }
 
   private buildSnapshot(): EngineSnapshot {
     const editable = this.isEditable();
@@ -696,15 +904,16 @@ export class BoardEngine implements ToolHost {
     const firstId = this.textEditor.editingId ?? firstSelected;
     const first = firstId ? this.model?.getItem(firstId) : undefined;
     if (first) {
-      if (first.type !== "image") strokeColor = first.stroke;
+      if (!isPicture(first)) strokeColor = first.stroke;
       if (first.type === "rect" || first.type === "ellipse") fillColor = first.fill;
-      if (first.type !== "text" && first.type !== "image") strokeWidth = first.strokeWidth;
+      if (first.type !== "text" && !isPicture(first)) strokeWidth = first.strokeWidth;
       if (first.type === "text") fontSize = first.fontSize;
     }
     return {
       tool: this.toolId,
       editable,
-      canUpload: editable && this.allowedToUpload,
+      canUpload: editable && this.allowedToUpload && this.options.assets !== undefined,
+      canAddPdf: this.canAddPdf(),
       canUndo: editable && (this.model?.canUndo() ?? false),
       canRedo: editable && (this.model?.canRedo() ?? false),
       zoom: this.camera.zoom,
@@ -986,7 +1195,7 @@ export class BoardEngine implements ToolHost {
     const file = [...(event.clipboardData?.files ?? [])].find((f) => f.type.startsWith("image/"));
     if (!file) return;
     event.preventDefault();
-    void this.insertImage(file);
+    void this.addImageWithNotice(file);
   };
 
   private onDragOver = (event: DragEvent): void => {
@@ -997,15 +1206,35 @@ export class BoardEngine implements ToolHost {
   };
 
   private onDrop = (event: DragEvent): void => {
-    const file = [...(event.dataTransfer?.files ?? [])].find((f) => f.type.startsWith("image/"));
-    if (!file || !this.getEditableModel()) return;
+    const files = [...(event.dataTransfer?.files ?? [])];
+    if (!this.getEditableModel() || files.length === 0) return;
     event.preventDefault();
+    const pdf = files.find((f) => f.type === "application/pdf");
+    if (pdf) {
+      this.options.onPdfDropped?.(pdf);
+      return;
+    }
+    const file = files.find((f) => f.type.startsWith("image/"));
+    if (!file) return;
     const rect = this.canvas.getBoundingClientRect();
-    void this.insertImage(
+    void this.addImageWithNotice(
       file,
       screenToWorld(this.camera, { x: event.clientX - rect.left, y: event.clientY - rect.top }),
     );
   };
+
+  /** Pasted or dropped images: progress and problems show as a short notice. */
+  private async addImageWithNotice(file: Blob, at?: Point): Promise<void> {
+    this.options.onNotice?.("Adding image…");
+    try {
+      await this.insertImage(file, at);
+      this.options.onNotice?.("");
+    } catch (error) {
+      this.options.onNotice?.(
+        error instanceof Error && error.message ? error.message : "Could not add that image.",
+      );
+    }
+  }
 
   private onBlur = (): void => {
     this.spaceHeld = false;

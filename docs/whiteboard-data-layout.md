@@ -1,10 +1,10 @@
 # Whiteboard data layout (version 2)
 
-Status: Phase 2 implements `meta`, `assets` (images inline, see below) and every item type except
-`pdfPage`, plus awareness `user`, `color`, `cursor` and `laser`, behind `VITE_BOARD_ENGINE=tuteria`.
-Code: `frontend/src/board/model/` and, per item type, `frontend/src/board/engine/items.ts`.
-`pdfPage` and R2 storage come in Phase 3. The Excalidraw board (version 1) stays the default until
-switch-over.
+Status: Phase 3 implements every item type including `pdfPage`, `assets` stored in Cloudflare R2,
+and awareness `user`, `color`, `cursor` and `laser`, behind `VITE_BOARD_ENGINE=tuteria`. Code:
+`frontend/src/board/model/`, per item type `frontend/src/board/engine/items.ts`, storage
+`backend/src/services/storage.ts` and `backend/src/modules/boards/uploads.ts`. The Excalidraw board
+(version 1) stays the default until switch-over.
 
 ## Decisions this layout follows
 
@@ -93,7 +93,7 @@ item (one moves it, one changes its colour) then merge instead of one overwritin
 | `line`, `arrow` | `points: number[]` `[x1, y1, x2, y2]`, `arrowStart: boolean`, `arrowEnd: boolean` |
 | `text` | `text: Y.Text`, `fontSize`, `fontFamily`, `align: "left" \| "center" \| "right"`, `w: number \| null` (wrap width) |
 | `image` | `assetId`, `w`, `h` |
-| `pdfPage` | `assetId`, `w`, `h`, `pdfName`, `pageNumber` (Phase 3) |
+| `pdfPage` | `assetId`, `w`, `h`, `pdfId` (shared by every page of one import), `pdfName`, `pageNumber` |
 
 From Phase 4, `pdfPage` items are written to the locked-layer document.
 
@@ -111,6 +111,7 @@ breaking.
 | `line`, `arrow` | Straight line; arrow heads are open chevrons, about 3.5× `strokeWidth` long. |
 | `text` | The Sora font, weight 500, in `stroke` colour. `strokeWidth` is unused (0). |
 | `image` | The asset, stretched to `w × h`. A grey placeholder until it loads. |
+| `pdfPage` | Like `image`, with a thin grey page edge. |
 
 ### Defaults
 
@@ -142,28 +143,45 @@ the item back.
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | Same as the map key |
-| `mime` | string | e.g. `image/jpeg` |
+| `mime` | string | `image/jpeg`, `image/png` or `image/webp` |
 | `width`, `height` | number | Pixel size of the stored image |
 | `bytes` | number | File size |
-| `url` | string | R2 location (Phase 3) |
-| `dataURL` | string | Temporary, Phase 2 only. Removed when R2 upload ships. |
+| `key` | string | R2 object key: `spaces/{spaceId}/boards/{assetId}.{jpg\|png\|webp}` |
+| `url` | string | Unused (always null). |
+| `dataURL` | string | Phase 2 only. Older boards may still have inline images; they keep working. New files never use it. |
 | `createdBy` | string | Participant id |
 
-**Phase 2 (temporary):** images are stored inline as `dataURL`. Before saving, an image is shrunk to
-at most 1600 px on its long side and compressed: PNG when that keeps it under 1 MB, otherwise JPEG
-at quality 0.85, then 0.7, then 0.55. Anything still over 1 MB is refused with a message. Images
-come from the Upload button, from pasting (Ctrl+V) or from dropping a file on the board.
+**The file itself is never in the board.** The board stores the R2 key; the image lives in a
+private R2 bucket.
 
-Only people with editing **and** the File uploads permission can add images (tutors and admins
-always can). The client checks this. The server can't, because an image is just data inside the
-board, so a student with editing could in principle write one. Phase 3 closes this gap: the R2
-upload endpoint checks the permission, and the board stores only the URL.
+### Uploading
 
-Assets are not part of undo. Undoing an image insert removes the image item and leaves its asset
-behind, unused. Phase 3 also adds a cleanup job for assets that no item references.
+1. The browser asks `POST /boards/{sessionId}/uploads` with `{ kind, contentType, bytes }`.
+2. The backend checks the person (see Permissions), then returns a new `assetId`, the `key` and an
+   upload link valid for 10 minutes. The link is signed for that exact content type and size, so R2
+   refuses any other file.
+3. The browser uploads straight to R2 (`PUT`), with a progress bar, and retries once if the network
+   drops.
+4. Only then does it add the asset and the item to the board.
 
-PDF pages are drawn in the browser by `frontend/src/board/pdf/rasterizePdf.ts`: 1100 px wide,
-JPEG quality 0.78, at most 20 pages per import.
+Limits: images 10 MB, PDF pages 8 MB each (both after the browser has shrunk them). Images are
+shrunk to at most 1600 px on the long side; PDF pages are drawn 1600 px wide as JPEG at quality 0.8.
+
+### Viewing
+
+R2 is private. The browser asks `POST /boards/{sessionId}/assets/urls` with up to 100 keys, and gets
+view links valid for 1 hour. Only admitted participants of that session get links, and only for keys
+of that session's space. The browser batches these requests, caches the links and renews them
+5 minutes before they expire. An image that has loaded stays on screen when its link is renewed.
+
+Images load only when their item comes near the visible area, so a long PDF loads page by page as
+people scroll.
+
+### Not done yet
+
+Assets are not part of undo, and nothing deletes R2 files when their items are deleted. That's
+deliberate for now, so undo can bring an item back. A cleanup job for files no board uses is still
+to do.
 
 ## Writes, undo and remote changes
 
@@ -190,8 +208,66 @@ JPEG quality 0.78, at most 20 pages per import.
 
 - **Now and Phases 1 to 3:** the server's per-connection `readOnly` check (`boards/service.ts`)
   decides who may write a document. The client hides editing tools when `canEdit` is false.
+- **Uploads (server-checked):** observers never. Tutors and admins always. Students and guests need
+  editing; for images also File uploads. Only tutors and admins can add PDF pages.
+- **Locked items:** nobody can move, resize or erase them. Tutors and admins can select them to
+  delete them (trash button or Delete key). Students can't select them at all. In Phase 3 this is
+  checked in the browser only; Phase 4 moves locked items into the server-enforced locked layer.
 - **Phase 4:** `{name}:locked` uses this same layout. Only admins and tutors can write to it;
   everyone else connects read-only. It is drawn underneath the main document.
+
+## PDFs
+
+The **Add to board** dialog (upload button, or dropping a file on the board) takes an image or, for
+tutors and admins, a PDF up to 50 MB. For a PDF it shows every page as a thumbnail (drawn when it
+scrolls into view) to untick, then a placement:
+
+| Choice | What happens |
+|---|---|
+| Below the board, locked (default) | Pages stacked under everything already on the board, 800 wide with a 24 gap, `locked: true`. |
+| Each page on its own tab | Shown but disabled until tabs exist (Phase 5). |
+| Where I'm looking, movable | Same stack, starting in the current view, `locked: false`. |
+
+Pages are drawn and uploaded one at a time, so there is no page limit and memory stays low. The
+whole import is one undo step. Cancel stops after the current page; pages already added stay.
+
+Selecting a PDF page shows **Remove whole PDF**, which deletes every page with the same `pdfId`. In
+Phase 5 this becomes the x on the PDF's tab.
+
+## Setting up R2 storage
+
+No frontend settings are needed. The backend reads:
+
+| Variable | Value |
+|---|---|
+| `R2_ACCOUNT_ID` | Your Cloudflare account ID |
+| `R2_ACCESS_KEY_ID` | From the R2 API token |
+| `R2_SECRET_ACCESS_KEY` | From the R2 API token |
+| `R2_BUCKET_NAME` | The bucket's name |
+| `R2_ENDPOINT_URL` | Optional. Only for an EU bucket: `https://{accountId}.eu.r2.cloudflarestorage.com` |
+
+Without them, uploads fail with "File storage isn't set up yet."
+
+In the Cloudflare dashboard:
+
+1. **R2 → Create bucket.** Keep it private: don't turn on public access or the r2.dev address.
+2. **R2 → Manage API tokens → Create API token.** Permission "Object Read & Write", limited to that
+   bucket. Copy the Access Key ID and Secret Access Key; the secret is shown only once.
+3. **The bucket → Settings → CORS policy**, so browsers may upload:
+
+   ```json
+   [
+     {
+       "AllowedOrigins": ["https://YOUR-FRONTEND-DOMAIN", "http://localhost:5173"],
+       "AllowedMethods": ["GET", "PUT"],
+       "AllowedHeaders": ["Content-Type"],
+       "MaxAgeSeconds": 3600
+     }
+   ]
+   ```
+
+On Render: the backend service → **Environment** → add the variables above → save, which redeploys.
+For local work, add the same lines to `backend/.env`.
 
 ## Archiving the version 1 boards (start of Phase 1)
 

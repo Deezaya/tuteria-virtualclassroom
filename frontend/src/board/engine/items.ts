@@ -2,7 +2,14 @@
  * Everything that differs per item type: measuring, hit-testing and
  * drawing. Phase 3 adds pdfPage here.
  */
-import { isBoxItem, type BoardItem, type BoxItem, type LineItem, type StrokeItem } from "../model/schema";
+import {
+  isBoxItem,
+  isPicture,
+  type BoardItem,
+  type BoxItem,
+  type LineItem,
+  type StrokeItem,
+} from "../model/schema";
 import {
   boundsContainPoint,
   boundsIntersect,
@@ -280,7 +287,7 @@ export function hitItem(item: BoardItem, geo: ItemGeometry, point: Point, radius
   const local = toBoxSpace(box, point);
   const inside = (pad: number) =>
     local.x >= -pad && local.x <= box.w + pad && local.y >= -pad && local.y <= box.h + pad;
-  if (item.type === "text" || item.type === "image") return inside(radius);
+  if (item.type === "text" || isPicture(item)) return inside(radius);
   const edge = radius + item.strokeWidth / 2;
   if (item.type === "rect") {
     if (item.fill) return inside(edge);
@@ -360,10 +367,16 @@ export function drawItem(ctx: CanvasRenderingContext2D, item: BoardItem, geo: It
       ctx.lineWidth = item.strokeWidth;
       ctx.stroke(geo.path);
     }
-  } else if (item.type === "image") {
+  } else if (isPicture(item)) {
     const image = env.image(item.assetId);
     if (image) {
       ctx.drawImage(image, 0, 0, box.w, box.h);
+      if (item.type === "pdfPage") {
+        // A thin edge so white pages stand out from the white board.
+        ctx.strokeStyle = "#d5dbe5";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(0, 0, box.w, box.h);
+      }
     } else {
       ctx.fillStyle = "#eef2f7";
       ctx.fillRect(0, 0, box.w, box.h);

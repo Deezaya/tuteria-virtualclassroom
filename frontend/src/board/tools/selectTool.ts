@@ -11,7 +11,7 @@ import {
 import type { Box } from "../engine/items";
 import { BOARD_COLORS } from "../engine/renderer";
 import type { ItemPatch } from "../model/BoardModel";
-import { isBoxItem, type BoardItem, type BoxItem, type LineItem } from "../model/schema";
+import { isBoxItem, isPicture, type BoardItem, type BoxItem, type LineItem } from "../model/schema";
 import type { BoardPointer, Tool, ToolHost } from "./types";
 
 /** How often a change in progress is written, so others see it live. */
@@ -79,6 +79,8 @@ export class SelectTool implements Tool {
   private timer: number | null = null;
   private committed = false;
   private lastDown: { id: string; at: number } | null = null;
+  /** Locked items can be picked only by tutors and admins (to delete them). */
+  private readonly selectable = (item: BoardItem) => this.host.canSelect(item);
 
   constructor(private readonly host: ToolHost) {}
 
@@ -112,7 +114,7 @@ export class SelectTool implements Tool {
       return;
     }
 
-    const hit = this.host.hitTest(pointer.world, HIT_PX / this.host.getCamera().zoom);
+    const hit = this.host.hitTest(pointer.world, HIT_PX / this.host.getCamera().zoom, this.selectable);
     const selection = new Set(this.host.getSelection());
 
     if (!hit) {
@@ -161,7 +163,7 @@ export class SelectTool implements Tool {
         break;
       case "marquee": {
         state.current = pointer.world;
-        const touched = this.host.itemsTouching(boundsFromPoints(state.start, state.current));
+        const touched = this.host.itemsTouching(boundsFromPoints(state.start, state.current)).filter(this.selectable);
         this.host.setSelection([...state.base, ...touched.map((item) => item.id)]);
         this.host.requestRender();
         return;
@@ -198,7 +200,7 @@ export class SelectTool implements Tool {
       this.hoverCursor = cursorForHandle(handle.id, handle.item.rotation);
       return;
     }
-    const over = this.host.hitTest(pointer.world, HIT_PX / this.host.getCamera().zoom);
+    const over = this.host.hitTest(pointer.world, HIT_PX / this.host.getCamera().zoom, this.selectable);
     this.hoverCursor = over ? "move" : "default";
   }
 
@@ -287,7 +289,7 @@ export class SelectTool implements Tool {
       return { ...startItem, x: box.x, y: box.y, w: Math.max(startItem.fontSize, box.w) };
     }
     // Images keep their shape unless Shift is held; other shapes the opposite.
-    const keepAspect = startItem.type === "image" ? !pointer.shiftKey : pointer.shiftKey;
+    const keepAspect = isPicture(startItem) ? !pointer.shiftKey : pointer.shiftKey;
     const box = resizeBox(startBox, handle, pointer.world, keepAspect);
     return { ...startItem, x: box.x, y: box.y, w: box.w, h: box.h };
   }
@@ -334,7 +336,7 @@ export class SelectTool implements Tool {
       const item = state.current;
       const patch: ItemPatch = { x: item.x, y: item.y, rotation: item.rotation };
       if (item.type === "line" || item.type === "arrow") patch.points = item.points;
-      if (item.type === "rect" || item.type === "ellipse" || item.type === "image") {
+      if (item.type === "rect" || item.type === "ellipse" || isPicture(item)) {
         patch.w = item.w;
         patch.h = item.h;
       }

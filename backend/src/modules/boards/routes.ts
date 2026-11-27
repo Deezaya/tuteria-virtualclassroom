@@ -16,7 +16,7 @@ const errorResponse = {
   required: ["message"],
 };
 
-async function findCurrentParticipant(request: FastifyRequest, sessionId: string) {
+export async function findCurrentParticipant(request: FastifyRequest, sessionId: string) {
   const participantId = getParticipantCookieId(request);
   if (participantId) {
     return prisma.participant.findUnique({
