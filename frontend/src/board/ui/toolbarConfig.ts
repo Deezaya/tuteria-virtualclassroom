@@ -42,7 +42,8 @@ export type ToolbarEntry = ToolEntry | MenuEntry | ActionEntry | { kind: "style"
 /**
  * Toolbar groups, left to right, in the reference design's order:
  * colour | select, move | pen, highlighter, eraser | shapes, text, laser,
- * upload | undo, redo, zoom | size. Later phases add entries here.
+ * upload | undo, redo, zoom | size. Leading Mode is in the Host controls
+ * panel, not here.
  */
 export const TOOLBAR: ToolbarEntry[][] = [
   [{ kind: "style" }],

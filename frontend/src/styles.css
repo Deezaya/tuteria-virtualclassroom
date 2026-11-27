@@ -3915,6 +3915,21 @@ a {
     font-size: 9px;
   }
 
+  .classroom-leading-toggle {
+    margin-top: 9px;
+  }
+
+  .classroom-leading-toggle:disabled {
+    cursor: default;
+  }
+
+  .classroom-leading-toggle small {
+    display: block;
+    margin-top: 2px;
+    color: #8b97a9;
+    font-size: 9px;
+  }
+
   .classroom-person-row.host-person-row {
     position: relative;
     overflow: visible;

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { getBoardToken } from "../../api/client";
 import type { ClassRole } from "../types";
+import { acquireBoardSocket, releaseBoardSocket } from "./sharedSocket";
 
 export type BoardConnectionStatus = "Reconnecting…" | "Connected" | "Offline";
 
@@ -61,6 +62,8 @@ type BoardConnectionOptions = {
   layer?: "main" | "locked";
   /** Whether to announce this person in awareness (default true). */
   presence?: boolean;
+  /** Send this document over the page's one shared board websocket (default false). */
+  shared?: boolean;
 };
 
 export function useBoardConnection(
@@ -72,6 +75,7 @@ export function useBoardConnection(
     spyMode,
     layer = "main",
     presence = true,
+    shared = false,
   }: BoardConnectionOptions,
   createBinding: (context: BoardBindingContext) => BoardBinding,
 ) {
@@ -91,6 +95,12 @@ export function useBoardConnection(
     let onAwarenessChange: (() => void) | null = null;
     let onPageHide: (() => void) | null = null;
     let disposed = false;
+    let socketAcquired = false;
+    const tokenOptions = {
+      ...(roomId ? { roomId } : {}),
+      ...(spyMode ? { spy: true } : {}),
+      ...(layer === "locked" ? { layer } : {}),
+    };
 
     setLoading(true);
     setError(false);
@@ -106,8 +116,13 @@ export function useBoardConnection(
         provider.off("awarenessChange", onAwarenessChange);
       }
       if (onPageHide) window.removeEventListener("pagehide", onPageHide);
-      provider?.configuration.websocketProvider.disconnect();
+      // A shared socket stays open for the page's other board documents.
+      if (!socketAcquired) provider?.configuration.websocketProvider.disconnect();
       provider?.destroy();
+      if (socketAcquired) {
+        socketAcquired = false;
+        releaseBoardSocket();
+      }
       doc?.destroy();
       if (providerRef.current === provider) providerRef.current = null;
       if (docRef.current === doc) docRef.current = null;
@@ -116,11 +131,7 @@ export function useBoardConnection(
 
     async function connect() {
       try {
-        const credentials = await getBoardToken(sessionId, {
-          ...(roomId ? { roomId } : {}),
-          ...(spyMode ? { spy: true } : {}),
-          ...(layer === "locked" ? { layer } : {}),
-        });
+        const credentials = await getBoardToken(sessionId, tokenOptions);
         if (!active) return;
 
         doc = new Y.Doc();
@@ -130,22 +141,31 @@ export function useBoardConnection(
           participantId: credentials.participantId,
         });
 
-        provider = new HocuspocusProvider({
-          url: boardWsUrl,
-          name: credentials.documentName,
-          document: doc,
-          token: async () => {
-            const refreshed = await getBoardToken(sessionId, {
-              ...(roomId ? { roomId } : {}),
-              ...(spyMode ? { spy: true } : {}),
-              ...(layer === "locked" ? { layer } : {}),
-            });
-            if (refreshed.documentName !== credentials.documentName) {
-              throw new Error("The board session changed. Rejoin the class to continue.");
-            }
-            return refreshed.token;
-          },
-        });
+        const token = async () => {
+          const refreshed = await getBoardToken(sessionId, tokenOptions);
+          if (refreshed.documentName !== credentials.documentName) {
+            throw new Error("The board session changed. Rejoin the class to continue.");
+          }
+          return refreshed.token;
+        };
+        if (shared) {
+          const websocketProvider = acquireBoardSocket(boardWsUrl);
+          socketAcquired = true;
+          provider = new HocuspocusProvider({
+            websocketProvider,
+            name: credentials.documentName,
+            document: doc,
+            token,
+          });
+          provider.attach();
+        } else {
+          provider = new HocuspocusProvider({
+            url: boardWsUrl,
+            name: credentials.documentName,
+            document: doc,
+            token,
+          });
+        }
         providerRef.current = provider;
         if (presence && classRole !== "observer") {
           provider.awareness?.setLocalStateField("user", {
@@ -180,6 +200,10 @@ export function useBoardConnection(
         });
         onPageHide = dispose;
         window.addEventListener("pagehide", onPageHide);
+        // A shared socket may already be open, so no status event comes.
+        if (shared && provider.configuration.websocketProvider.status === "connected") {
+          setConnection("Connected");
+        }
         setLoading(false);
         binding.onSync();
       } catch {
@@ -195,7 +219,7 @@ export function useBoardConnection(
       active = false;
       dispose();
     };
-  }, [attempt, classRole, displayName, layer, presence, roomId, sessionId, spyMode]);
+  }, [attempt, classRole, displayName, layer, presence, roomId, sessionId, shared, spyMode]);
 
   return {
     connection,

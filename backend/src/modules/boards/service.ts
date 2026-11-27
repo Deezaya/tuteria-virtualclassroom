@@ -30,6 +30,8 @@ type ConnectionEntry = {
 /** Suffix of a board's locked-layer document, e.g. `space:{id}:main:locked`. */
 export const LOCKED_LAYER_SUFFIX = ":locked";
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 type BoardTokenPayload = {
   sub: string;
   classRole: string;
@@ -138,26 +140,28 @@ export function createBoardServer(app: FastifyInstance): void {
       const boardName = lockedLayer
         ? documentName.slice(0, -LOCKED_LAYER_SUFFIX.length)
         : documentName;
+      const host = payload.classRole === "admin" || payload.classRole === "tutor";
+      const spy = payload.spy === true;
       const documentRoomId = boardName.startsWith(`${participant.session.id}:`)
         ? boardName.slice(participant.session.id.length + 1)
         : null;
-      const documentRoom = documentRoomId
-        ? await prisma.breakoutRoom.findFirst({
-            where: {
-              id: documentRoomId,
-              sessionId: participant.session.id,
-            },
-            select: { id: true },
-          })
-        : null;
+      // Only look up real room ids; anything else can't be a breakout board.
+      const documentRoom =
+        documentRoomId && UUID_PATTERN.test(documentRoomId)
+          ? await prisma.breakoutRoom.findFirst({
+              where: {
+                id: documentRoomId,
+                sessionId: participant.session.id,
+              },
+              select: { id: true },
+            })
+          : null;
       const isOwnBoard = participant.breakoutRoomId
         ? documentRoom?.id === participant.breakoutRoomId
         : `space:${participant.session.spaceId}:main` === boardName;
       const isSpyBoard =
-        payload.spy === true &&
-        (payload.classRole === "admin" ||
-          payload.classRole === "tutor" ||
-          payload.classRole === "observer") &&
+        spy &&
+        (host || payload.classRole === "observer") &&
         documentRoom !== null;
       if (!isOwnBoard && !isSpyBoard) {
         throw new Error("Participant is no longer admitted to this board");
@@ -169,8 +173,7 @@ export function createBoardServer(app: FastifyInstance): void {
         !Array.isArray(participant.permissions)
           ? (participant.permissions as Record<string, unknown>)
           : {};
-      const host = payload.classRole === "admin" || payload.classRole === "tutor";
-      const spy = payload.spy === true;
+      // Everyone with Editing writes the board; only hosts write its locked layer.
       const editing =
         payload.editing !== false &&
         !spy &&

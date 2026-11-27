@@ -10,6 +10,8 @@ type AddDialogProps = {
   assets: AssetService;
   canAddPdf: boolean;
   canAddImage: boolean;
+  /** May add tabs: offers "each page on its own tab". */
+  canUseTabs: boolean;
   /** A file dropped on the board, to start with. */
   initialFile: File | null;
   onClose(): void;
@@ -99,6 +101,7 @@ export function AddDialog({
   assets,
   canAddPdf,
   canAddImage,
+  canUseTabs,
   initialFile,
   onClose,
   onNotice,
@@ -221,7 +224,7 @@ export function AddDialog({
         const placed = engine.addPdfPage(
           { ...uploaded, mime: "image/jpeg", width: page.width, height: page.height, bytes: page.blob.size },
           placer.next(page.height / page.width),
-          { pdfId, pdfName: fileName, pageNumber, locked: placement === "stack" },
+          { pdfId, pdfName: fileName, pageNumber, locked: placement !== "view", ownTab: placement === "tabs" },
         );
         if (!placed) throw new UploadError("Editing was turned off, so the PDF couldn't be finished.");
         done += 1;
@@ -364,11 +367,17 @@ export function AddDialog({
                   <small>One under another. Students can write on them but can't move or erase them.</small>
                 </span>
               </label>
-              <label className="is-disabled">
-                <input disabled name="placement" type="radio" />
+              <label className={canUseTabs ? undefined : "is-disabled"}>
+                <input
+                  checked={placement === "tabs"}
+                  disabled={!canUseTabs}
+                  name="placement"
+                  onChange={() => setPlacement("tabs")}
+                  type="radio"
+                />
                 <span>
                   <strong>Each page on its own tab</strong>
-                  <small>Comes with tabs in a later update.</small>
+                  <small>A new tab for every page, locked. The x on a tab can remove the whole PDF.</small>
                 </span>
               </label>
               <label>

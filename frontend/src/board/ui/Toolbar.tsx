@@ -1,4 +1,4 @@
-import { Ban, Eye, Maximize, Search, SlidersHorizontal, ZoomIn, ZoomOut } from "lucide-react";
+import { Ban, Eye, Maximize, Navigation, Search, SlidersHorizontal, ZoomIn, ZoomOut } from "lucide-react";
 import {
   useEffect,
   useRef,
@@ -40,6 +40,8 @@ type ToolbarProps = {
   onZoomOut(): void;
   onZoomReset(): void;
   onZoomFit(): void;
+  /** Leading Mode is following someone: shown as a label. */
+  followingName?: string | null;
 };
 
 /** Keeps focus where it is (e.g. in a text box being typed in). */
@@ -86,7 +88,8 @@ export function Toolbar(props: ToolbarProps) {
   // Close panels that no longer apply, e.g. after editing is turned off.
   useEffect(() => {
     if (!snapshot.editable && open && open.id !== "zoom") setOpen(null);
-  }, [snapshot.editable, open]);
+    if (snapshot.following && open?.id === "zoom") setOpen(null);
+  }, [snapshot.editable, snapshot.following, open]);
 
   function toggle(id: PanelId) {
     if (open?.id === id) {
@@ -111,6 +114,7 @@ export function Toolbar(props: ToolbarProps) {
   const groups = TOOLBAR.map((group) => group.filter((entry) => canEdit || !entryEdits(entry))).filter(
     (group) => group.length > 0,
   );
+  const following = snapshot.following;
   const highlighter = snapshot.tool === "highlighter";
   const shapesEntry = TOOLBAR.flat().find((entry) => entry.kind === "shapes");
   const activeShape =
@@ -142,7 +146,7 @@ export function Toolbar(props: ToolbarProps) {
             aria-label={entry.label}
             aria-pressed={active}
             className={`tb-button${active ? " is-active" : ""}`}
-            disabled={entry.edits && !snapshot.editable}
+            disabled={entry.edits ? !snapshot.editable : following}
             key={key}
             onClick={() => props.onTool(entry.id)}
             title={`${entry.label} (${entry.shortcut})`}
@@ -200,6 +204,7 @@ export function Toolbar(props: ToolbarProps) {
             aria-expanded={open?.id === "zoom"}
             aria-label={`Zoom ${Math.round(snapshot.zoom * 100)}%`}
             className={`tb-button tb-zoom${open?.id === "zoom" ? " is-active" : ""}`}
+            disabled={following}
             key={key}
             onClick={() => toggle("zoom")}
             ref={anchorRef("zoom")}
@@ -384,6 +389,12 @@ export function Toolbar(props: ToolbarProps) {
 
         <div className="tb-spacer" />
 
+        {props.followingName && (
+          <span className="tb-chip is-following">
+            <Navigation aria-hidden="true" size={14} />
+            Following {props.followingName}
+          </span>
+        )}
         {!canEdit && (
           <span className="tb-chip">
             <Eye aria-hidden="true" size={14} />

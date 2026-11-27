@@ -2,16 +2,25 @@ import * as Y from "yjs";
 import { isValidKey, keyBetween } from "./fractionalIndex";
 import {
   compareItems,
+  compareTabs,
+  DEFAULT_TAB_ID,
+  DEFAULT_TAB_NAME,
   LEGACY_ROOT_ELEMENTS,
+  MAX_TAB_NAME,
   readAsset,
   readItem,
+  readLeading,
+  readTab,
   ROOT_ASSETS,
   ROOT_ITEMS,
   ROOT_META,
+  ROOT_TABS,
   SCHEMA_VERSION,
   type BoardAsset,
   type BoardItem,
+  type BoardTab,
   type ItemMap,
+  type Leading,
 } from "./schema";
 
 /** Transaction origin for this client's own edits. Undo tracks only these. */
@@ -24,8 +33,13 @@ export const LOCAL_ORIGIN = { source: "local-board-edit" };
 export type SchemaStatus = "pending" | "ok" | "legacy" | "newer";
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
-/** An item as a tool creates it; the model fills in z, createdBy and createdAt. */
-export type NewItem = DistributiveOmit<BoardItem, "z" | "createdBy" | "createdAt">;
+/**
+ * An item as a tool creates it; the model fills in z, createdBy and
+ * createdAt, and the tab being shown unless one is given.
+ */
+export type NewItem = DistributiveOmit<BoardItem, "z" | "createdBy" | "createdAt" | "tab"> & {
+  tab?: string;
+};
 export type ItemPatch = Record<string, unknown>;
 
 /** Keys a patch may never change. */
@@ -44,7 +58,12 @@ export class BoardModel {
   private readonly meta: Y.Map<unknown>;
   private readonly items: Y.Map<ItemMap>;
   private readonly assets: Y.Map<Y.Map<unknown>>;
+  private readonly tabs: Y.Map<Y.Map<unknown>>;
   private readonly cache = new Map<string, BoardItem>();
+  private sortedTabs: BoardTab[] | null = null;
+  private leading: Leading | null | undefined = undefined;
+  /** New items go on this tab. */
+  private activeTab = DEFAULT_TAB_ID;
   /** Bumped on every change; lets the renderer cache per-item geometry. */
   private readonly versions = new Map<string, number>();
   private sorted: BoardItem[] | null = null;
@@ -54,6 +73,8 @@ export class BoardModel {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly onDeepChange: (events: Array<Y.YEvent<any>>) => void;
   private readonly onAssetsChange: () => void;
+  private readonly onTabsChange: () => void;
+  private readonly onMetaChange: () => void;
   private readonly onHistoryChange: () => void;
 
   constructor(doc: Y.Doc, participantId: string) {
@@ -62,9 +83,10 @@ export class BoardModel {
     this.meta = doc.getMap(ROOT_META);
     this.items = doc.getMap<ItemMap>(ROOT_ITEMS);
     this.assets = doc.getMap<Y.Map<unknown>>(ROOT_ASSETS);
+    this.tabs = doc.getMap<Y.Map<unknown>>(ROOT_TABS);
     // Gestures call endStep() at their start and end, so one stroke or one
     // move is exactly one undo step however long it takes.
-    this.undoManager = new Y.UndoManager(this.items, {
+    this.undoManager = new Y.UndoManager([this.items, this.tabs], {
       captureTimeout: Number.MAX_SAFE_INTEGER,
       trackedOrigins: new Set([LOCAL_ORIGIN]),
     });
@@ -86,6 +108,18 @@ export class BoardModel {
     this.onAssetsChange = () => this.emit();
     this.assets.observeDeep(this.onAssetsChange);
 
+    this.onTabsChange = () => {
+      this.sortedTabs = null;
+      this.emit();
+    };
+    this.tabs.observeDeep(this.onTabsChange);
+
+    this.onMetaChange = () => {
+      this.leading = undefined;
+      this.emit();
+    };
+    this.meta.observe(this.onMetaChange);
+
     this.onHistoryChange = () => this.historyListeners.forEach((listener) => listener());
     this.undoManager.on("stack-item-added", this.onHistoryChange);
     this.undoManager.on("stack-item-popped", this.onHistoryChange);
@@ -95,6 +129,8 @@ export class BoardModel {
   destroy(): void {
     this.items.unobserveDeep(this.onDeepChange);
     this.assets.unobserveDeep(this.onAssetsChange);
+    this.tabs.unobserveDeep(this.onTabsChange);
+    this.meta.unobserve(this.onMetaChange);
     this.undoManager.destroy();
     this.listeners.clear();
     this.historyListeners.clear();
@@ -132,6 +168,28 @@ export class BoardModel {
     return map ? readAsset(id, map) : null;
   }
 
+  /**
+   * The board's tabs in order. A board with no tab list has one tab,
+   * DEFAULT_TAB_ID, which holds every item written before tabs existed.
+   */
+  getTabs(): readonly BoardTab[] {
+    if (!this.sortedTabs) {
+      const tabs: BoardTab[] = [];
+      this.tabs.forEach((map, id) => tabs.push(readTab(id, map)));
+      this.sortedTabs =
+        tabs.length > 0
+          ? tabs.sort(compareTabs)
+          : [{ id: DEFAULT_TAB_ID, name: DEFAULT_TAB_NAME, z: "", pdfId: null }];
+    }
+    return this.sortedTabs;
+  }
+
+  /** Leading Mode: who leads, or null when it is off. */
+  getLeading(): Leading | null {
+    if (this.leading === undefined) this.leading = readLeading(this.meta.get("leading"));
+    return this.leading;
+  }
+
   getSchemaStatus(): SchemaStatus {
     return this.status;
   }
@@ -166,6 +224,58 @@ export class BoardModel {
 
   // ---- writing ----
 
+  /** The tab new items go on. */
+  setActiveTab(tab: string): void {
+    this.activeTab = tab;
+  }
+
+  /** Adds a tab (after `after`, or at the end) and returns its id. */
+  addTab(name: string, pdfId: string | null = null, after?: string): string {
+    const id = crypto.randomUUID();
+    const map = new Y.Map<unknown>();
+    this.doc.transact(() => {
+      this.materializeTabs();
+      const tabs = this.getTabs();
+      const index = after ? tabs.findIndex((tab) => tab.id === after) : -1;
+      const before = index >= 0 ? tabs[index] : tabs[tabs.length - 1];
+      const next = index >= 0 ? tabs[index + 1] : undefined;
+      const low = before && isValidKey(before.z) ? before.z : null;
+      const high = next && isValidKey(next.z) && (low === null || next.z > low) ? next.z : null;
+      map.set("name", cleanTabName(name));
+      map.set("z", keyBetween(low, high));
+      if (pdfId) map.set("pdfId", pdfId);
+      map.set("createdBy", this.participantId);
+      map.set("createdAt", Date.now());
+      this.tabs.set(id, map);
+    }, LOCAL_ORIGIN);
+    return id;
+  }
+
+  renameTab(id: string, name: string): void {
+    const clean = cleanTabName(name);
+    this.doc.transact(() => {
+      this.materializeTabs();
+      const map = this.tabs.get(id);
+      if (map && map.get("name") !== clean) map.set("name", clean);
+    }, LOCAL_ORIGIN);
+  }
+
+  /** Removes tabs from the list. Their items are deleted separately. */
+  deleteTabs(ids: Iterable<string>): void {
+    this.doc.transact(() => {
+      this.materializeTabs();
+      for (const id of ids) this.tabs.delete(id);
+    }, LOCAL_ORIGIN);
+  }
+
+  /** Turns Leading Mode on (with who leads) or off. Not part of undo. */
+  setLeading(leading: Leading | null): void {
+    this.doc.transact(() => {
+      if (leading) this.meta.set("leading", { by: leading.by, name: leading.name.slice(0, 80) });
+      else this.meta.delete("leading");
+    }, LOCAL_ORIGIN);
+  }
+
   /** Ends the current undo step, so the next write starts a new one. */
   endStep(): void {
     this.undoManager.stopCapturing();
@@ -190,6 +300,7 @@ export class BoardModel {
           map.set(key, value);
         }
       }
+      if (item.tab === undefined) map.set("tab", this.activeTab);
       map.set("z", this.nextZ());
       map.set("createdBy", origin?.createdBy ?? this.participantId);
       map.set("createdAt", origin?.createdAt ?? Date.now());
@@ -321,6 +432,18 @@ export class BoardModel {
 
   // ---- internals ----
 
+  /** Writes the implicit first tab, so the list can change without losing it. */
+  private materializeTabs(): void {
+    if (this.tabs.size > 0) return;
+    const map = new Y.Map<unknown>();
+    map.set("name", DEFAULT_TAB_NAME);
+    map.set("z", keyBetween(null, null));
+    map.set("createdBy", this.participantId);
+    map.set("createdAt", Date.now());
+    this.tabs.set(DEFAULT_TAB_ID, map);
+    this.sortedTabs = null;
+  }
+
   private nextZ(): string {
     let top: string | null = null;
     for (const item of this.cache.values()) {
@@ -340,6 +463,10 @@ export class BoardModel {
   private emit(): void {
     this.listeners.forEach((listener) => listener());
   }
+}
+
+function cleanTabName(name: string): string {
+  return name.replace(/\s+/g, " ").trim().slice(0, MAX_TAB_NAME) || "Page";
 }
 
 function sameNumbers(a: unknown[], b: unknown[]): boolean {

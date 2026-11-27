@@ -9,6 +9,12 @@ export const SCHEMA_VERSION = 2;
 export const ROOT_META = "meta";
 export const ROOT_ITEMS = "items";
 export const ROOT_ASSETS = "assets";
+/** Board pages (tabs). Lives in the locked layer, so only hosts can change it. */
+export const ROOT_TABS = "tabs";
+/** The tab of items written before tabs existed, and of a board with no tab list yet. */
+export const DEFAULT_TAB_ID = "main";
+export const DEFAULT_TAB_NAME = "Page 1";
+export const MAX_TAB_NAME = 40;
 /** Version 1 (Excalidraw) roots. Read only to detect an old board. */
 export const LEGACY_ROOT_ELEMENTS = "elements";
 
@@ -34,6 +40,8 @@ type ItemBase = {
   opacity: number;
   /** Phase 4 moves enforcement to the locked-layer document. */
   locked: boolean;
+  /** The tab (board page) this item is on. */
+  tab: string;
 };
 
 export type StrokeItem = ItemBase & {
@@ -144,6 +152,7 @@ export function readItem(id: string, map: ItemMap): BoardItem | null {
     strokeWidth: num(map, "strokeWidth", 3),
     opacity: num(map, "opacity", 1),
     locked: map.get("locked") === true,
+    tab: str(map, "tab", DEFAULT_TAB_ID),
   };
   const type = map.get("type");
   switch (type) {
@@ -224,6 +233,42 @@ export function readAsset(id: string, map: Y.Map<unknown>): BoardAsset {
     dataURL: typeof dataURL === "string" ? dataURL : null,
     createdBy: str(map, "createdBy", ""),
   };
+}
+
+/** One board page. */
+export type BoardTab = {
+  id: string;
+  name: string;
+  /** Fractional index: tabs are shown in this order. */
+  z: string;
+  /** Set on tabs made by "each page on its own tab", so the PDF can be removed from its tab. */
+  pdfId: string | null;
+};
+
+export function readTab(id: string, map: Y.Map<unknown>): BoardTab {
+  const pdfId = map.get("pdfId");
+  const name = str(map, "name", "").trim();
+  return {
+    id,
+    name: (name || "Page").slice(0, MAX_TAB_NAME),
+    z: str(map, "z", ""),
+    pdfId: typeof pdfId === "string" && pdfId ? pdfId : null,
+  };
+}
+
+export function compareTabs(a: BoardTab, b: BoardTab): number {
+  if (a.z !== b.z) return a.z < b.z ? -1 : 1;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/** Leading Mode, stored in the locked layer's `meta.leading`. */
+export type Leading = { by: string; name: string };
+
+export function readLeading(value: unknown): Leading | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { by, name } = value as Record<string, unknown>;
+  if (typeof by !== "string" || !by) return null;
+  return { by, name: typeof name === "string" && name ? name.slice(0, 80) : "Tutor" };
 }
 
 export function isBoxItem(item: BoardItem): item is BoxItem {

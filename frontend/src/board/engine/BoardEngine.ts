@@ -1,6 +1,13 @@
 import type { BoardModel, ItemPatch, SchemaStatus } from "../model/BoardModel";
 import { BoardHistory } from "../model/history";
-import { BOARD_FONT, isPicture, type BoardItem } from "../model/schema";
+import {
+  BOARD_FONT,
+  DEFAULT_TAB_ID,
+  DEFAULT_TAB_NAME,
+  isPicture,
+  type BoardItem,
+  type BoardTab,
+} from "../model/schema";
 import type { AssetService } from "../sync/assetService";
 import { EraserTool } from "../tools/eraserTool";
 import { HandTool } from "../tools/handTool";
@@ -46,7 +53,17 @@ export type EngineSnapshot = {
   strokeWidth: number;
   fontSize: number;
   editingText: boolean;
+  /** The tab being shown, and every tab in order. */
+  tab: string;
+  tabs: readonly BoardTab[];
+  /** Tutors and admins who can edit: may add, rename and delete tabs. */
+  canManageTabs: boolean;
+  /** Leading Mode: the view follows the tutor's, and can't be moved. */
+  following: boolean;
 };
+
+/** A part of the board in world units, on one tab. */
+export type ViewRect = { tab: string; x: number; y: number; w: number; h: number };
 
 export type StylePatch = Partial<{
   stroke: string;
@@ -59,9 +76,10 @@ export type RemoteLaser = { clientId: number; points: Point[]; color: string };
 
 /**
  * Where PDF pages go. "stack": below everything on the board, locked.
+ * "tabs": each page on a new tab of its own, locked.
  * "view": where the person is looking, movable.
  */
-export type PdfPlacement = "stack" | "view";
+export type PdfPlacement = "stack" | "tabs" | "view";
 export type PdfPlacer = { next(aspect: number): { x: number; y: number; w: number; h: number } };
 export type UploadedPage = { assetId: string; key: string; mime: string; width: number; height: number; bytes: number };
 
@@ -80,6 +98,8 @@ type EngineOptions = {
   onNotice?: (message: string) => void;
   /** A PDF dropped on the board; the page opens the PDF dialog. */
   onPdfDropped?: (file: File) => void;
+  /** The part of the board on screen changed (camera, size or tab). */
+  onView?: (view: ViewRect) => void;
 };
 
 type Gesture =
@@ -89,6 +109,10 @@ type Gesture =
 
 const EMPTY: ReadonlySet<string> = new Set();
 const NO_ITEMS: readonly BoardItem[] = [];
+const DEFAULT_TABS: readonly BoardTab[] = [
+  { id: DEFAULT_TAB_ID, name: DEFAULT_TAB_NAME, z: "", pdfId: null },
+];
+const HOME: Camera = { x: 0, y: 0, zoom: 1 };
 const LASER_FADE_MS = 600;
 /** New images take at most this share of the visible board. */
 const IMAGE_FIT = 0.6;
@@ -146,14 +170,23 @@ export class BoardEngine implements ToolHost {
   private lockedModel: BoardModel | null = null;
   private unsubscribeLocked: (() => void) | null = null;
   private readonly history = new BoardHistory();
-  /** Both layers' items in drawing order, rebuilt when either changes. */
+  /** Both layers' items on the shown tab, in drawing order, rebuilt when either changes. */
   private combined: {
     main: readonly BoardItem[];
     locked: readonly BoardItem[];
+    tab: string;
     items: BoardItem[];
     byId: Map<string, { item: BoardItem; layer: "main" | "locked" }>;
   } | null = null;
-  private camera: Camera = { x: 0, y: 0, zoom: 1 };
+  private camera: Camera = HOME;
+  /** The tab being shown, and where the camera was on the others. */
+  private tab = DEFAULT_TAB_ID;
+  private readonly tabCameras = new Map<string, Camera>();
+  /** Leading Mode: the tutor's view this board follows, or null. */
+  private follow: ViewRect | null = null;
+  /** "Each page on its own tab": the tab the next page goes after. */
+  private pdfTabAfter: string | null = null;
+  private pdfTabFirst = false;
   private allowedToEdit = false;
   private allowedToUpload = false;
   /** Tutors and admins: may add PDFs and delete locked items. */
@@ -292,6 +325,7 @@ export class BoardEngine implements ToolHost {
     this.cache.clear();
     this.images.clear();
     if (model) {
+      model.setActiveTab(this.tab);
       this.history.attach(model);
       this.unsubscribeModel = model.subscribe(() => this.onModelChange());
     }
@@ -308,6 +342,7 @@ export class BoardEngine implements ToolHost {
     this.lockedModel = model;
     this.combined = null;
     if (model) {
+      model.setActiveTab(this.tab);
       this.history.attach(model);
       this.unsubscribeLocked = model.subscribe(() => this.onModelChange());
     }
@@ -402,6 +437,109 @@ export class BoardEngine implements ToolHost {
       }
     }
     this.updateSnapshot();
+  }
+
+  // ---- tabs ----
+
+  /** The board's tabs in order. The list lives in the locked layer. */
+  getTabs(): readonly BoardTab[] {
+    return this.lockedModel?.getTabs() ?? DEFAULT_TABS;
+  }
+
+  getTab(): string {
+    return this.tab;
+  }
+
+  /** Shows another tab. Not while following the tutor in Leading Mode. */
+  setTab(id: string): void {
+    if (this.follow) return;
+    if (!this.getTabs().some((tab) => tab.id === id)) return;
+    this.switchTab(id);
+  }
+
+  /** Tutors and admins who can edit. */
+  canManageTabs(): boolean {
+    return this.getWritableLockedModel() !== null && this.getEditableModel() !== null;
+  }
+
+  /** Adds a tab after the last one and shows it. */
+  addTab(): void {
+    const locked = this.getWritableLockedModel();
+    if (!locked || !this.canManageTabs()) return;
+    const names = new Set(this.getTabs().map((tab) => tab.name));
+    let number = this.getTabs().length + 1;
+    while (names.has(`Page ${number}`)) number += 1;
+    this.endGesture(true);
+    let id = "";
+    this.history.group(() => {
+      id = locked.addTab(`Page ${number}`);
+    });
+    this.switchTab(id);
+  }
+
+  renameTab(id: string, name: string): void {
+    const locked = this.getWritableLockedModel();
+    if (!locked || !this.canManageTabs() || !name.trim()) return;
+    this.history.group(() => locked.renameTab(id, name));
+  }
+
+  /** Deletes a tab and everything on it, in both layers, as one undo step. */
+  deleteTab(id: string): void {
+    this.deleteTabsAndItems([id], () => false);
+  }
+
+  /** Everything a PDF brought: its pages on any tab, and the tabs made for it. */
+  describePdf(pdfId: string): { name: string; pages: number; tabs: number } {
+    let name = "";
+    let pages = 0;
+    for (const item of this.allItems()) {
+      if (item.type === "pdfPage" && item.pdfId === pdfId) {
+        pages += 1;
+        name ||= item.pdfName;
+      }
+    }
+    const tabs = this.getTabs().filter((tab) => tab.pdfId === pdfId).length;
+    return { name: name || "this PDF", pages, tabs };
+  }
+
+  /** Removes every page of a PDF and the tabs made for it, as one undo step. */
+  removePdf(pdfId: string): void {
+    if (!this.host || !pdfId) return;
+    const tabs = this.getTabs().filter((tab) => tab.pdfId === pdfId).map((tab) => tab.id);
+    this.deleteTabsAndItems(tabs, (item) => item.type === "pdfPage" && item.pdfId === pdfId);
+    this.setSelection([]);
+  }
+
+  /**
+   * Leading Mode: follows the tutor's view (their tab, and at least the part
+   * of the board they see), or stops following with null.
+   */
+  setFollow(view: ViewRect | null): void {
+    const current = this.follow;
+    const same =
+      current !== null &&
+      view !== null &&
+      current.tab === view.tab &&
+      current.x === view.x &&
+      current.y === view.y &&
+      current.w === view.w &&
+      current.h === view.h;
+    // Presence changes often (everyone's cursors); only move when the view did.
+    if (same || (current === null && view === null)) return;
+    this.follow = view;
+    if (view) {
+      if (view.tab !== this.tab && this.getTabs().some((tab) => tab.id === view.tab)) {
+        this.switchTab(view.tab);
+      }
+      this.fitView(view);
+    }
+    this.updateSnapshot();
+  }
+
+  /** The part of the board on screen now. */
+  getView(): ViewRect {
+    const { x, y, zoom } = this.camera;
+    return { tab: this.tab, x, y, w: this.width / zoom, h: this.height / zoom };
   }
 
   setRemoteCursors(cursors: RemoteCursor[]): void {
@@ -531,16 +669,14 @@ export class BoardEngine implements ToolHost {
     if (!model || !this.host) return;
     const page = [...this.selection].map((id) => this.getItem(id)).find((item) => item?.type === "pdfPage");
     if (page?.type !== "pdfPage" || !page.pdfId) return;
-    const ids = this.getItems()
-      .filter((item) => item.type === "pdfPage" && item.pdfId === page.pdfId)
-      .map((item) => item.id);
-    const name = page.pdfName || "this PDF";
-    if (!window.confirm(`Remove all ${ids.length} page${ids.length === 1 ? "" : "s"} of ${name}? You can undo this.`)) {
+    const { name, pages, tabs } = this.describePdf(page.pdfId);
+    const tabText =
+      tabs > 0 ? `, and its ${tabs} tab${tabs === 1 ? "" : "s"} with everything drawn on them` : "";
+    if (!window.confirm(`Remove all ${pages} page${pages === 1 ? "" : "s"} of ${name}${tabText}? You can undo this.`)) {
       return;
     }
     this.endGesture(true);
-    this.deleteFromLayers(ids);
-    this.setSelection([]);
+    this.removePdf(page.pdfId);
   }
 
   /**
@@ -608,6 +744,13 @@ export class BoardEngine implements ToolHost {
   beginPdfImport(placement: PdfPlacement): PdfPlacer {
     this.getEditableModel()?.endStep();
     this.getWritableLockedModel()?.endStep();
+    if (placement === "tabs") {
+      // Every page on a new tab, at the same spot; addPdfPage makes the tab.
+      this.pdfTabAfter = this.tab;
+      this.pdfTabFirst = true;
+      return { next: (aspect) => ({ x: 0, y: 0, w: PDF_PAGE_WIDTH, h: PDF_PAGE_WIDTH * aspect }) };
+    }
+    this.pdfTabAfter = null;
     let x: number;
     let y: number;
     if (placement === "stack") {
@@ -652,11 +795,25 @@ export class BoardEngine implements ToolHost {
   addPdfPage(
     page: UploadedPage,
     area: { x: number; y: number; w: number; h: number },
-    info: { pdfId: string; pdfName: string; pageNumber: number; locked: boolean },
+    info: { pdfId: string; pdfName: string; pageNumber: number; locked: boolean; ownTab?: boolean },
   ): boolean {
     // Locked pages go into the locked layer, which only hosts can write.
-    const model = info.locked ? this.getWritableLockedModel() : this.getEditableModel();
+    const model = info.locked || info.ownTab ? this.getWritableLockedModel() : this.getEditableModel();
     if (!model || !this.host) return false;
+    let tab: string | undefined;
+    if (info.ownTab) {
+      const base = info.pdfName.replace(/\.pdf$/i, "").trim() || "PDF";
+      const suffix = ` p${info.pageNumber}`;
+      tab = model.addTab(`${base.slice(0, 40 - suffix.length)}${suffix}`, info.pdfId, this.pdfTabAfter ?? this.tab);
+      const first = this.pdfTabFirst;
+      this.pdfTabFirst = false;
+      this.pdfTabAfter = tab;
+      if (first) {
+        // Show the first page's tab, so the tutor sees where the PDF went.
+        this.switchTab(tab);
+        this.fitView({ tab, x: area.x - 40, y: area.y - 40, w: area.w + 80, h: Math.min(area.h, area.w) + 80 });
+      }
+    }
     model.addAsset({
       id: page.assetId,
       mime: page.mime,
@@ -684,12 +841,14 @@ export class BoardEngine implements ToolHost {
       pdfId: info.pdfId,
       pdfName: info.pdfName,
       pageNumber: info.pageNumber,
+      ...(tab ? { tab } : {}),
     });
     return true;
   }
 
   /** Ends a PDF import, so the whole import is one undo step. */
   endPdfImport(): void {
+    this.pdfTabAfter = null;
     this.getEditableModel()?.endStep();
     this.getWritableLockedModel()?.endStep();
   }
@@ -745,10 +904,10 @@ export class BoardEngine implements ToolHost {
     return this.camera;
   }
 
+  /** Moves the camera for this person. Ignored while following the tutor. */
   setCamera(camera: Camera): void {
-    this.camera = { ...camera, zoom: clampZoom(camera.zoom) };
-    this.updateSnapshot();
-    this.requestRender();
+    if (this.follow) return;
+    this.placeCamera(camera);
   }
 
   requestRender(): void {
@@ -810,21 +969,100 @@ export class BoardEngine implements ToolHost {
   private layers(): NonNullable<BoardEngine["combined"]> {
     const main = this.model?.getSortedItems() ?? NO_ITEMS;
     const locked = this.lockedModel?.getSortedItems() ?? NO_ITEMS;
+    const tab = this.tab;
     const cached = this.combined;
-    if (cached && cached.main === main && cached.locked === locked) return cached;
+    if (cached && cached.main === main && cached.locked === locked && cached.tab === tab) return cached;
     const byId = new Map<string, { item: BoardItem; layer: "main" | "locked" }>();
     const items: BoardItem[] = [];
     for (const raw of locked) {
+      if (raw.tab !== tab) continue;
       const item = raw.locked ? raw : { ...raw, locked: true };
       items.push(item);
       byId.set(item.id, { item, layer: "locked" });
     }
     for (const item of main) {
+      if (item.tab !== tab) continue;
       items.push(item);
       byId.set(item.id, { item, layer: "main" });
     }
-    this.combined = { main, locked, items, byId };
+    this.combined = { main, locked, tab, items, byId };
     return this.combined;
+  }
+
+  /** Every item on every tab, in both layers. */
+  private allItems(): BoardItem[] {
+    return [...(this.lockedModel?.getSortedItems() ?? NO_ITEMS), ...(this.model?.getSortedItems() ?? NO_ITEMS)];
+  }
+
+  /**
+   * Deletes tabs with everything on them, plus any other items `alsoDelete`
+   * picks (on any tab), from both layers as one undo step.
+   */
+  private deleteTabsAndItems(tabIds: string[], alsoDelete: (item: BoardItem) => boolean): void {
+    const main = this.getEditableModel();
+    const locked = this.getWritableLockedModel();
+    if (!main || !locked) return;
+    const tabs = this.getTabs();
+    const doomed = new Set(tabIds);
+    if (tabs.every((tab) => doomed.has(tab.id))) {
+      // Always keep one tab: empty the last one instead of deleting it.
+      const keep = tabs[0].id;
+      doomed.delete(keep);
+    }
+    const pick = (item: BoardItem) => doomed.has(item.tab) || alsoDelete(item);
+    const mainIds = main.getSortedItems().filter(pick).map((item) => item.id);
+    const lockedIds = locked.getSortedItems().filter(pick).map((item) => item.id);
+    if (doomed.has(this.tab)) {
+      const index = tabs.findIndex((tab) => tab.id === this.tab);
+      const next =
+        tabs.slice(index + 1).find((tab) => !doomed.has(tab.id)) ??
+        [...tabs.slice(0, index)].reverse().find((tab) => !doomed.has(tab.id));
+      if (next) this.switchTab(next.id);
+    }
+    this.endGesture(true);
+    this.history.group(() => {
+      if (mainIds.length > 0) main.deleteItems(mainIds);
+      if (lockedIds.length > 0) locked.deleteItems(lockedIds);
+      if (doomed.size > 0) locked.deleteTabs(doomed);
+    });
+  }
+
+  private switchTab(id: string): void {
+    if (id === this.tab) return;
+    this.textEditor.end();
+    this.endGesture(true);
+    this.tools[this.toolId].hover?.(null);
+    this.tabCameras.set(this.tab, this.camera);
+    this.tab = id;
+    this.model?.setActiveTab(id);
+    this.lockedModel?.setActiveTab(id);
+    this.combined = null;
+    this.selection = new Set();
+    this.camera = this.tabCameras.get(id) ?? HOME;
+    this.updateSnapshot();
+    this.requestRender();
+    this.emitView();
+  }
+
+  /** Fits a part of the board into view, so all of it shows. */
+  private fitView(view: ViewRect): void {
+    const zoom = clampZoom(Math.min(this.width / Math.max(1, view.w), this.height / Math.max(1, view.h)));
+    this.placeCamera({
+      x: view.x + view.w / 2 - this.width / 2 / zoom,
+      y: view.y + view.h / 2 - this.height / 2 / zoom,
+      zoom,
+    });
+  }
+
+  private placeCamera(camera: Camera): void {
+    this.camera = { ...camera, zoom: clampZoom(camera.zoom) };
+    this.updateSnapshot();
+    this.requestRender();
+    this.emitView();
+  }
+
+  private emitView(): void {
+    this.options.onView?.(this.getView());
   }
 
   private layerOf(id: string): "main" | "locked" | null {
@@ -876,8 +1114,25 @@ export class BoardEngine implements ToolHost {
   }
 
   private onModelChange(): void {
+    // The shown tab was deleted (by someone else, or by undo): show another.
+    // Only once the tab list (in the locked layer) has loaded.
+    const tabsLoaded = this.lockedModel !== null && this.lockedModel.getSchemaStatus() !== "pending";
+    const tabs = this.getTabs();
+    const followed = this.follow;
+    if (!tabsLoaded) {
+      // Wait for the locked layer.
+    } else if (followed && followed.tab !== this.tab && tabs.some((tab) => tab.id === followed.tab)) {
+      // Following the tutor onto a tab that has only just arrived.
+      this.switchTab(followed.tab);
+      this.fitView(followed);
+    } else if (!tabs.some((tab) => tab.id === this.tab)) {
+      this.switchTab(tabs[0].id);
+    }
     const model = this.model;
-    if (!model) return;
+    if (!model) {
+      this.updateSnapshot();
+      return;
+    }
     // Editability can change when the schema check finishes.
     if (this.isEditable() !== this.snapshot.editable) this.applyEditability();
     let pruned = false;
@@ -928,6 +1183,8 @@ export class BoardEngine implements ToolHost {
     this.canvas.height = Math.round(this.height * this.dpr);
     this.canvas.style.width = `${this.width}px`;
     this.canvas.style.height = `${this.height}px`;
+    if (this.follow) this.fitView(this.follow);
+    else this.emitView();
     this.requestRender();
   }
 
@@ -1067,6 +1324,10 @@ export class BoardEngine implements ToolHost {
       strokeWidth,
       fontSize,
       editingText: this.textEditor.editingId !== null,
+      tab: this.tab,
+      tabs: this.getTabs(),
+      canManageTabs: this.canManageTabs(),
+      following: this.follow !== null,
     };
   }
 

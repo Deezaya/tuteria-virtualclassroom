@@ -1,8 +1,10 @@
 # Whiteboard data layout (version 2)
 
-Status: Phase 4 adds the server-enforced locked layer (`{name}:locked`) and one undo history across
-both documents. Phase 3 added every item type including `pdfPage`, `assets` stored in Cloudflare
-R2, and awareness `user`, `color`, `cursor` and `laser`. All behind `VITE_BOARD_ENGINE=tuteria`. Code:
+Status: Phase 5 adds tabs, Leading Mode (switched from the Host controls panel), PDF pages on their
+own tabs, and one shared websocket for both board documents. Phase 4 added the
+server-enforced locked layer (`{name}:locked`) and one undo history across both documents. Phase 3
+added every item type including `pdfPage` and `assets` stored in Cloudflare R2. All behind
+`VITE_BOARD_ENGINE=tuteria`. Code:
 `frontend/src/board/model/`, per item type `frontend/src/board/engine/items.ts`, storage
 `backend/src/services/storage.ts` and `backend/src/modules/boards/uploads.ts`. The Excalidraw board
 (version 1) stays the default until switch-over.
@@ -14,7 +16,8 @@ R2, and awareness `user`, `color`, `cursor` and `laser`. All behind `VITE_BOARD_
 | Existing boards are test data. Archive them and start fresh. No converter. | Start of Phase 1 |
 | Content students must not move or erase lives in a separate locked-layer document. | Phase 4 |
 | Images and PDF pages are stored in R2. The Yjs document holds only references. | Phase 3 |
-| Tabs, per-student boards and Leading Mode are a separate effort. | Phase 5 |
+| Tabs and Leading Mode are a separate effort. | Phase 5 |
+| No per-student boards: they aren't in the PRD and Lessonspace doesn't have them. | Phase 5 cleanup |
 
 ## Engine flag
 
@@ -30,20 +33,23 @@ Hocuspocus document names don't change:
 |---|---|
 | Main board of a space (kept across sessions) | `space:{spaceId}:main` |
 | Breakout room board (one session) | `{sessionId}:{roomId}` |
-| Locked layer of either board | `{name}:locked`, e.g. `space:{spaceId}:main:locked` |
+| Locked layer of any board | `{name}:locked`, e.g. `space:{spaceId}:main:locked` |
 
 The server stores each document as opaque bytes in `boards.data`. Both documents of a board use the
 same layout below. The browser asks for each with its own token: `POST /boards/{sessionId}/token`
-with `layer: "locked"` returns a token for the locked layer. It opens two connections per board, one
-for each document.
+with `layer: "locked"` returns a token for the locked layer.
+
+Both documents of the board travel over **one websocket** (`sync/sharedSocket.ts`). Hocuspocus still checks each
+document's token on its own. The Excalidraw board keeps its own connection.
 
 ## Root types in each document
 
 | Name | Type | Holds |
 |---|---|---|
-| `meta` | `Y.Map` | `schemaVersion: 2` |
+| `meta` | `Y.Map` | `schemaVersion: 2`. In the locked layer also `leading` (see Leading Mode). |
 | `items` | `Y.Map<Y.Map>` | One nested map per item, keyed by item id |
 | `assets` | `Y.Map<Y.Map>` | One entry per image, keyed by asset id |
+| `tabs` | `Y.Map<Y.Map>` | The board's tabs, keyed by tab id. **Locked layer only**, so only hosts can change it. See Tabs. |
 | `elements`, `files` | — | **Reserved for version 1 (Excalidraw). Version 2 never reads or writes them.** |
 
 Each item is a nested `Y.Map`, not a JSON string. Two people changing different fields of the same
@@ -86,6 +92,7 @@ item (one moves it, one changes its colour) then merge instead of one overwritin
 | `strokeWidth` | number | World units |
 | `opacity` | number | 0 to 1 |
 | `locked` | boolean | Only from Phase 3, when PDF pages were locked inside the main document (checked in the browser only). New items always write `false`: an item is locked by being in the locked layer. |
+| `tab` | string | The tab the item is on. Missing (items from before Phase 5) means `"main"`. |
 
 ### Item types
 
@@ -196,6 +203,9 @@ to do.
 - An abandoned gesture (a second finger turns a stroke into a pinch) is reverted and removed from
   history with `discardStep()`.
 - Moves are written every 50 ms while dragging, so others see them live.
+- Adding, renaming and deleting a tab are undo steps too. Deleting a tab deletes everything on it
+  (both layers) in the same step, so undo brings it all back. Undo can change a tab you aren't
+  looking at.
 - **One history for both documents** (`model/history.ts`). Each document keeps its own
   `Y.UndoManager`; the shared history records which document(s) each step touched. Undo always
   reverts this person's latest step. A step that changes both documents at once (locking,
@@ -209,7 +219,9 @@ to do.
 | `color` | `#rrggbb`, this person's cursor colour. Picked from their participant id, so it stays the same when they reconnect. | 2 |
 | `cursor` | `{ x, y }` in world units, or `null`. Sent at most every 100 ms, only by people who can edit. | 1 |
 | `laser` | Flat `[x, y, …]` world points from the last 0.7 s, oldest first, or `null`. Sent at most every 50 ms while the laser is held down. When it becomes `null`, everyone's copy fades out over 0.6 s. Never saved. | 2 |
-| `viewport` | `{ x, y, zoom }`, reserved for Leading Mode | 5 |
+| `pid` | This person's participant id, so others can find the tutor leading or a student's tab. | 5 |
+| `tab` | The tab this person is looking at. Cursors and lasers show only to people on the same tab. | 5 |
+| `viewport` | `{ tab, x, y, w, h }`: the part of the board on the leading tutor's screen, in world units. Only the tutor leading sends it, at most every 100 ms; otherwise `null`. | 5 |
 
 ## Permissions
 
@@ -218,6 +230,8 @@ to do.
 - **Uploads (server-checked):** observers never. Tutors and admins always. Students and guests need
   editing; for images also File uploads. Only tutors and admins can add PDF pages.
 - **Locked layer (server-checked):** see the next section.
+- **Tabs and Leading Mode (server-checked):** both live in the locked layer, so only tutors and
+  admins can change them.
 
 ## Locked layer
 
@@ -246,6 +260,44 @@ In the browser:
   Images and PDF pages bring their asset entry with them. Both can be undone.
 - Live cursors and the laser travel only on the main document.
 
+## Tabs
+
+A board has one or more tabs (pages). The list is the locked layer's `tabs` map:
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | Up to 40 characters |
+| `z` | string | Fractional index: the tab order |
+| `pdfId` | string, optional | Set on tabs made by "each page on its own tab" |
+| `createdBy`, `createdAt` | | As for items |
+
+- A board with an empty `tabs` map has one tab, `"main"`, called "Page 1". It holds every item
+  written before tabs existed. The first change to the list writes `"main"` into the map.
+- Each item's `tab` says where it is. The engine shows only the current tab's items; new items go on
+  the current tab. Items whose tab no longer exists are not shown.
+- Tutors and admins add (+), rename (double-click) and delete (x) tabs. The last tab can't be
+  deleted. Everyone else can switch tabs, except while following in Leading Mode.
+- Each person's tab and camera are their own (not saved). The camera is remembered per tab.
+
+## Leading Mode
+
+Switched on and off by tutors and admins in the **Host controls** (crown) panel, not on the board.
+The panel and the board talk through `board/leadingControl.ts`, which has no board code, so the panel
+doesn't load the board. With the Excalidraw board the panel row stays disabled ("Coming soon"). In
+spy mode it is disabled too.
+
+While it is on, students and observers on that board follow the tutor's
+view: their tab and camera are set so they see at least what the tutor sees. They can't pan, zoom or
+switch tabs, and see "Following {name}". They can still draw, if they may edit.
+
+- Stored in the locked layer's `meta.leading` as `{ by: participantId, name }`, or missing when off.
+  It stays on until a tutor turns it off, even if the tutor reloads. Any tutor can turn it off.
+- The tutor leading sends `viewport` in awareness. Followers find it by `pid`.
+- If the tutor leading isn't there (left the class), students can move freely
+  and see "Waiting for {name}". They follow again when the tutor comes back.
+- Each board has its own: Leading Mode in a breakout room leads only that room. The panel switches
+  the Leading Mode of the board the tutor is on.
+
 ## PDFs
 
 The **Add to board** dialog (upload button, or dropping a file on the board) takes an image or, for
@@ -255,14 +307,21 @@ scrolls into view) to untick, then a placement:
 | Choice | What happens |
 |---|---|
 | Below the board, locked (default) | Pages stacked under everything already on the board, 800 wide with a 24 gap, in the **locked layer**. |
-| Each page on its own tab | Shown but disabled until tabs exist (Phase 5). |
+| Each page on its own tab | A new tab per page (named after the file and page number, after the current tab), the page at the top of it, in the **locked layer**. The tabs carry the PDF's `pdfId`. |
 | Where I'm looking, movable | Same stack, starting in the current view, in the main document. |
 
 Pages are drawn and uploaded one at a time, so there is no page limit and memory stays low. The
 whole import is one undo step. Cancel stops after the current page; pages already added stay.
 
-Selecting a PDF page shows **Remove whole PDF**, which deletes every page with the same `pdfId`. In
-Phase 5 this becomes the x on the PDF's tab.
+Selecting a PDF page shows **Remove whole PDF**, which deletes every page with the same `pdfId` and
+the tabs made for it (with everything on them). On a tab made for a PDF, the x offers "Remove only
+this tab" or "Remove the whole PDF". Both can be undone.
+
+## Known limits
+
+- Awareness (presence) is not checked by the server. Someone who changes the page's code could send
+  a fake `viewport` with the tutor's `pid` and move followers' views. They can't change any board
+  content this way.
 
 ## Setting up R2 storage
 

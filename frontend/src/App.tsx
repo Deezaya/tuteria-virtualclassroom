@@ -5,6 +5,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type FormEvent,
   type ReactNode,
 } from "react";
@@ -127,7 +128,8 @@ import {
   type SessionTimerSnapshot,
 } from "./api/client";
 import { useAuth } from "./auth/AuthProvider";
-import { loadWhiteboard } from "./board/engine";
+import { boardEngine, loadWhiteboard } from "./board/engine";
+import { leadingControl } from "./board/leadingControl";
 
 const Whiteboard = lazy(loadWhiteboard);
 
@@ -1768,6 +1770,8 @@ function RoomTestControls({
   const hostControlsRef = useRef<HTMLDivElement>(null);
   const personMenuRef = useRef<HTMLDivElement>(null);
   const isHostClassRole = classRole === "admin" || classRole === "tutor";
+  // Leading Mode lives on the new whiteboard; this panel switches it.
+  const leadingState = useSyncExternalStore(leadingControl.subscribe, leadingControl.getSnapshot);
   const canPublish = classRole !== "observer";
   const canEditBoard = !spyRoomId && classRole !== "observer" && (isHostClassRole || myPermissions.editing);
   const canUseMicrophone = canPublish && myPermissions.microphone;
@@ -3380,9 +3384,37 @@ function RoomTestControls({
                 ) : null}
                 {observerLinkError && <p role="alert">{observerLinkError}</p>}
               </div>
-              <button className="classroom-leading-mode" disabled title="Coming soon" type="button">
-                <span>Leading Mode</span><small>Coming soon</small>
-              </button>
+              {boardEngine === "tuteria" ? (
+                <button
+                  aria-checked={leadingState.active}
+                  className="classroom-permission-toggle classroom-leading-toggle"
+                  disabled={!leadingState.available}
+                  onClick={() => leadingControl.toggle()}
+                  role="switch"
+                  title={
+                    leadingState.available
+                      ? "Students follow your board view: tab, zoom and scroll"
+                      : "Available on the board, when you're not spying on a breakout room"
+                  }
+                  type="button"
+                >
+                  <span>
+                    Leading Mode
+                    <small>
+                      {!leadingState.active
+                        ? "Students follow your board view"
+                        : leadingState.byMe
+                          ? "On: students follow your view"
+                          : `On: ${leadingState.leaderName ?? "another tutor"} is leading`}
+                    </small>
+                  </span>
+                  <i className={leadingState.active ? "enabled" : ""} />
+                </button>
+              ) : (
+                <button className="classroom-leading-mode" disabled title="Coming soon" type="button">
+                  <span>Leading Mode</span><small>Coming soon</small>
+                </button>
+              )}
               {hostControlsError && <p className="classroom-host-error" role="alert">{hostControlsError}</p>}
               {participantsLoadError && <p className="classroom-host-error" role="alert">{participantsLoadError}</p>}
             </section>

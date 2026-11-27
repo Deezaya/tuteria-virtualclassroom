@@ -130,6 +130,7 @@ export class PenTool implements Tool {
         strokeWidth: active.strokeWidth,
         opacity: this.kind === "highlighter" ? HIGHLIGHTER_OPACITY : 1,
         locked: false,
+        tab: "",
         tool: this.kind,
         points: active.points,
         done: false,
