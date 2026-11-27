@@ -8,18 +8,30 @@ const TRASH_ICON =
 const FILE_X_ICON =
   '<svg aria-hidden="true" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m14.5 12.5-5 5"/><path d="m9.5 12.5 5 5"/></svg>';
 
+const LOCK_ICON =
+  '<svg aria-hidden="true" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
+const UNLOCK_ICON =
+  '<svg aria-hidden="true" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>';
+
 export type SelectionBarState = {
   /** Selection bounds on screen, or null to hide the bar. */
   area: { x: number; y: number; w: number; h: number } | null;
   showRemovePdf: boolean;
+  showLock: boolean;
+  showUnlock: boolean;
   containerWidth: number;
 };
 
 export class SelectionBar {
   private readonly element: HTMLDivElement;
   private readonly removePdfButton: HTMLButtonElement;
+  private readonly lockButton: HTMLButtonElement;
+  private readonly unlockButton: HTMLButtonElement;
 
-  constructor(container: HTMLElement, handlers: { onDelete(): void; onRemovePdf(): void }) {
+  constructor(
+    container: HTMLElement,
+    handlers: { onDelete(): void; onRemovePdf(): void; onLock(): void; onUnlock(): void },
+  ) {
     const element = document.createElement("div");
     element.className = "tb-selection-bar";
     element.setAttribute("role", "toolbar");
@@ -39,6 +51,8 @@ export class SelectionBar {
       element.appendChild(button);
       return button;
     };
+    this.lockButton = make("Lock", LOCK_ICON, handlers.onLock);
+    this.unlockButton = make("Unlock", UNLOCK_ICON, handlers.onUnlock);
     make("Delete", TRASH_ICON, handlers.onDelete);
     this.removePdfButton = make("Remove whole PDF", FILE_X_ICON, handlers.onRemovePdf);
     container.appendChild(element);
@@ -52,6 +66,8 @@ export class SelectionBar {
       return;
     }
     this.removePdfButton.hidden = !state.showRemovePdf;
+    this.lockButton.hidden = !state.showLock;
+    this.unlockButton.hidden = !state.showUnlock;
     element.hidden = false;
     const width = element.offsetWidth;
     const height = element.offsetHeight;

@@ -171,7 +171,11 @@ export class BoardModel {
     this.undoManager.stopCapturing();
   }
 
-  createItem(item: NewItem): void {
+  /**
+   * Adds an item on top. `origin` keeps the author and time of an item
+   * moved here from another document (locking and unlocking).
+   */
+  createItem(item: NewItem, origin?: { createdBy: string; createdAt: number }): void {
     const map = new Y.Map<unknown>();
     this.doc.transact(() => {
       for (const [key, value] of Object.entries(item)) {
@@ -187,8 +191,8 @@ export class BoardModel {
         }
       }
       map.set("z", this.nextZ());
-      map.set("createdBy", this.participantId);
-      map.set("createdAt", Date.now());
+      map.set("createdBy", origin?.createdBy ?? this.participantId);
+      map.set("createdAt", origin?.createdAt ?? Date.now());
       this.items.set(item.id, map);
     }, LOCAL_ORIGIN);
   }
@@ -259,6 +263,27 @@ export class BoardModel {
   deleteItems(ids: Iterable<string>): void {
     this.doc.transact(() => {
       for (const id of ids) this.items.delete(id);
+    }, LOCAL_ORIGIN);
+  }
+
+  /** Recreates an item read from another document, keeping its id and author. */
+  importItem(item: BoardItem): void {
+    const copy: Record<string, unknown> = { ...item };
+    delete copy.z;
+    delete copy.createdBy;
+    delete copy.createdAt;
+    this.createItem(copy as NewItem, { createdBy: item.createdBy, createdAt: item.createdAt });
+  }
+
+  /** Copies an asset from another document if this one doesn't have it yet. */
+  copyAsset(asset: BoardAsset): void {
+    if (this.assets.has(asset.id)) return;
+    const map = new Y.Map<unknown>();
+    this.doc.transact(() => {
+      for (const [key, value] of Object.entries(asset)) {
+        if (key !== "id" && value !== undefined) map.set(key, value);
+      }
+      this.assets.set(asset.id, map);
     }, LOCAL_ORIGIN);
   }
 

@@ -57,10 +57,22 @@ type BoardConnectionOptions = {
   roomId: string | null;
   sessionId: string;
   spyMode: boolean;
+  /** Which document of the board: the main one (default) or its locked layer. */
+  layer?: "main" | "locked";
+  /** Whether to announce this person in awareness (default true). */
+  presence?: boolean;
 };
 
 export function useBoardConnection(
-  { classRole, displayName, roomId, sessionId, spyMode }: BoardConnectionOptions,
+  {
+    classRole,
+    displayName,
+    roomId,
+    sessionId,
+    spyMode,
+    layer = "main",
+    presence = true,
+  }: BoardConnectionOptions,
   createBinding: (context: BoardBindingContext) => BoardBinding,
 ) {
   const [attempt, setAttempt] = useState(0);
@@ -107,6 +119,7 @@ export function useBoardConnection(
         const credentials = await getBoardToken(sessionId, {
           ...(roomId ? { roomId } : {}),
           ...(spyMode ? { spy: true } : {}),
+          ...(layer === "locked" ? { layer } : {}),
         });
         if (!active) return;
 
@@ -125,6 +138,7 @@ export function useBoardConnection(
             const refreshed = await getBoardToken(sessionId, {
               ...(roomId ? { roomId } : {}),
               ...(spyMode ? { spy: true } : {}),
+              ...(layer === "locked" ? { layer } : {}),
             });
             if (refreshed.documentName !== credentials.documentName) {
               throw new Error("The board session changed. Rejoin the class to continue.");
@@ -133,7 +147,7 @@ export function useBoardConnection(
           },
         });
         providerRef.current = provider;
-        if (classRole !== "observer") {
+        if (presence && classRole !== "observer") {
           provider.awareness?.setLocalStateField("user", {
             name: displayName,
             role: classRole,
@@ -181,7 +195,7 @@ export function useBoardConnection(
       active = false;
       dispose();
     };
-  }, [attempt, classRole, displayName, roomId, sessionId, spyMode]);
+  }, [attempt, classRole, displayName, layer, presence, roomId, sessionId, spyMode]);
 
   return {
     connection,

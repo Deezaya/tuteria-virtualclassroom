@@ -109,6 +109,7 @@ export default function TuteriaWhiteboard({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<BoardEngine | null>(null);
   const modelRef = useRef<BoardModel | null>(null);
+  const lockedModelRef = useRef<BoardModel | null>(null);
   const [engine, setEngine] = useState<BoardEngine | null>(null);
   const [notice, setNotice] = useState("");
   /** The "Add to board" dialog, with a dropped file to start from. */
@@ -121,8 +122,10 @@ export default function TuteriaWhiteboard({
   const editable = canEdit && !spyMode;
   const editableRef = useRef(editable);
   editableRef.current = editable;
+  const isHostRef = useRef(isHost);
+  isHostRef.current = isHost;
 
-  const { connection, error, loading, providerRef, retry } = useBoardConnection(
+  const main = useBoardConnection(
     { classRole, displayName, roomId, sessionId, spyMode },
     ({ getProvider }) => {
       let model: BoardModel | null = null;
@@ -168,6 +171,50 @@ export default function TuteriaWhiteboard({
       };
     },
   );
+
+  // The locked layer: a second document, drawn underneath. The server lets
+  // only tutors and admins write to it. It carries no presence.
+  const locked = useBoardConnection(
+    { classRole, displayName, roomId, sessionId, spyMode, layer: "locked", presence: false },
+    ({ getProvider }) => {
+      let model: BoardModel | null = null;
+      return {
+        attach(doc, session) {
+          model = new BoardModel(doc, session.participantId);
+          lockedModelRef.current = model;
+          engineRef.current?.setLockedModel(model);
+        },
+        onAwarenessChange() {},
+        onSync() {
+          if (model?.getSchemaStatus() === "pending" && getProvider()?.isSynced) {
+            model.checkSchema(editableRef.current && isHostRef.current);
+          }
+        },
+        detach() {
+          if (lockedModelRef.current === model) engineRef.current?.setLockedModel(null);
+        },
+        release() {
+          model?.destroy();
+          if (lockedModelRef.current === model) lockedModelRef.current = null;
+          model = null;
+        },
+      };
+    },
+  );
+
+  const { providerRef } = main;
+  const error = main.error || locked.error;
+  const loading = main.loading || locked.loading;
+  const connection =
+    main.connection === "Offline" || locked.connection === "Offline"
+      ? "Offline"
+      : main.connection === "Connected" && locked.connection === "Connected"
+        ? "Connected"
+        : "Reconnecting…";
+  const retry = () => {
+    main.retry();
+    locked.retry();
+  };
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -215,6 +262,7 @@ export default function TuteriaWhiteboard({
     });
     engineRef.current = instance;
     instance.setModel(modelRef.current);
+    instance.setLockedModel(lockedModelRef.current);
     setEngine(instance);
     return () => {
       if (cursorTimer !== null) window.clearTimeout(cursorTimer);

@@ -15,6 +15,8 @@ type BoardContext = {
   host: boolean;
   /** Spy-mode view of another room's board: always read-only. */
   spy: boolean;
+  /** The board's locked layer: only hosts may write. */
+  lockedLayer: boolean;
 };
 
 type ConnectionEntry = {
@@ -22,7 +24,11 @@ type ConnectionEntry = {
   observer: boolean;
   host: boolean;
   spy: boolean;
+  lockedLayer: boolean;
 };
+
+/** Suffix of a board's locked-layer document, e.g. `space:{id}:main:locked`. */
+export const LOCKED_LAYER_SUFFIX = ":locked";
 
 type BoardTokenPayload = {
   sub: string;
@@ -39,14 +45,18 @@ const participantConnections = new Map<string, Set<ConnectionEntry>>();
 /**
  * Applies a change to a participant's Editing permission to their open
  * board connections. Observers and spy views stay read-only and hosts stay
- * writable, whatever the permission says.
+ * writable, whatever the permission says. A locked layer is writable only
+ * by hosts, so the permission never opens it to anyone else.
  */
 export function updateBoardParticipantEditing(
   participantId: string,
   editing: boolean,
 ): void {
   for (const entry of participantConnections.get(participantId) ?? []) {
-    entry.connection.readOnly = entry.observer || entry.spy || (!entry.host && !editing);
+    entry.connection.readOnly =
+      entry.observer ||
+      entry.spy ||
+      (entry.lockedLayer ? !entry.host : !entry.host && !editing);
   }
 }
 
@@ -123,8 +133,13 @@ export function createBoardServer(app: FastifyInstance): void {
         throw new Error("Participant is no longer admitted to this board");
       }
 
-      const documentRoomId = documentName.startsWith(`${participant.session.id}:`)
-        ? documentName.slice(participant.session.id.length + 1)
+      // A locked layer follows the same access rules as its board.
+      const lockedLayer = documentName.endsWith(LOCKED_LAYER_SUFFIX);
+      const boardName = lockedLayer
+        ? documentName.slice(0, -LOCKED_LAYER_SUFFIX.length)
+        : documentName;
+      const documentRoomId = boardName.startsWith(`${participant.session.id}:`)
+        ? boardName.slice(participant.session.id.length + 1)
         : null;
       const documentRoom = documentRoomId
         ? await prisma.breakoutRoom.findFirst({
@@ -137,7 +152,7 @@ export function createBoardServer(app: FastifyInstance): void {
         : null;
       const isOwnBoard = participant.breakoutRoomId
         ? documentRoom?.id === participant.breakoutRoomId
-        : `space:${participant.session.spaceId}:main` === documentName;
+        : `space:${participant.session.spaceId}:main` === boardName;
       const isSpyBoard =
         payload.spy === true &&
         (payload.classRole === "admin" ||
@@ -160,10 +175,12 @@ export function createBoardServer(app: FastifyInstance): void {
         payload.editing !== false &&
         !spy &&
         payload.classRole !== "observer" &&
-        (host ||
-          (typeof storedPermissions.editing === "boolean"
-            ? storedPermissions.editing
-            : true));
+        (lockedLayer
+          ? host
+          : host ||
+            (typeof storedPermissions.editing === "boolean"
+              ? storedPermissions.editing
+              : true));
       connectionConfig.readOnly = !editing;
       return {
         participantId: payload.sub,
@@ -172,6 +189,7 @@ export function createBoardServer(app: FastifyInstance): void {
         editing,
         host,
         spy,
+        lockedLayer,
       };
     },
     async connected({ connection, context }) {
@@ -182,6 +200,7 @@ export function createBoardServer(app: FastifyInstance): void {
         observer: context.classRole === "observer",
         host: context.host,
         spy: context.spy,
+        lockedLayer: context.lockedLayer,
       };
       entries.add(entry);
       participantConnections.set(context.participantId, entries);

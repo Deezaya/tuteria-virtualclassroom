@@ -1,4 +1,5 @@
 import type { BoardModel, ItemPatch, SchemaStatus } from "../model/BoardModel";
+import { BoardHistory } from "../model/history";
 import { BOARD_FONT, isPicture, type BoardItem } from "../model/schema";
 import type { AssetService } from "../sync/assetService";
 import { EraserTool } from "../tools/eraserTool";
@@ -87,6 +88,7 @@ type Gesture =
   | { kind: "pinch"; ids: [number, number]; startDistance: number; anchor: Point; startZoom: number };
 
 const EMPTY: ReadonlySet<string> = new Set();
+const NO_ITEMS: readonly BoardItem[] = [];
 const LASER_FADE_MS = 600;
 /** New images take at most this share of the visible board. */
 const IMAGE_FIT = 0.6;
@@ -137,8 +139,20 @@ export class BoardEngine implements ToolHost {
     number,
     { points: Point[]; color: string; updatedAt: number; active: boolean }
   >();
+  /** The board's main document: everyone with editing writes here. */
   private model: BoardModel | null = null;
   private unsubscribeModel: (() => void) | null = null;
+  /** The board's locked layer: drawn underneath, written only by hosts. */
+  private lockedModel: BoardModel | null = null;
+  private unsubscribeLocked: (() => void) | null = null;
+  private readonly history = new BoardHistory();
+  /** Both layers' items in drawing order, rebuilt when either changes. */
+  private combined: {
+    main: readonly BoardItem[];
+    locked: readonly BoardItem[];
+    items: BoardItem[];
+    byId: Map<string, { item: BoardItem; layer: "main" | "locked" }>;
+  } | null = null;
   private camera: Camera = { x: 0, y: 0, zoom: 1 };
   private allowedToEdit = false;
   private allowedToUpload = false;
@@ -188,7 +202,10 @@ export class BoardEngine implements ToolHost {
     this.selectionBar = new SelectionBar(container, {
       onDelete: () => this.deleteSelection(),
       onRemovePdf: () => this.removeSelectedPdf(),
+      onLock: () => this.lockSelection(),
+      onUnlock: () => this.unlockSelection(),
     });
+    this.cleanups.push(this.history.subscribe(() => this.updateSnapshot()));
     this.tools = {
       select: new SelectTool(this),
       hand: new HandTool(this),
@@ -243,6 +260,7 @@ export class BoardEngine implements ToolHost {
     this.textEditor.end();
     this.endGesture(true);
     this.setModel(null);
+    this.setLockedModel(null);
     this.destroyed = true;
     if (this.frame !== null) cancelAnimationFrame(this.frame);
     this.cleanups.forEach((cleanup) => cleanup());
@@ -267,19 +285,35 @@ export class BoardEngine implements ToolHost {
     this.endGesture(true);
     this.unsubscribeModel?.();
     this.unsubscribeModel = null;
+    if (this.model) this.history.detach(this.model);
     this.model = model;
+    this.combined = null;
     this.selection = new Set();
     this.cache.clear();
     this.images.clear();
     if (model) {
-      const offChange = model.subscribe(() => this.onModelChange());
-      const offHistory = model.subscribeHistory(() => this.updateSnapshot());
-      this.unsubscribeModel = () => {
-        offChange();
-        offHistory();
-      };
+      this.history.attach(model);
+      this.unsubscribeModel = model.subscribe(() => this.onModelChange());
     }
     this.applyEditability();
+  }
+
+  /** Attaches the board's locked layer (or detaches it with null). */
+  setLockedModel(model: BoardModel | null): void {
+    if (model === this.lockedModel) return;
+    this.endGesture(true);
+    this.unsubscribeLocked?.();
+    this.unsubscribeLocked = null;
+    if (this.lockedModel) this.history.detach(this.lockedModel);
+    this.lockedModel = model;
+    this.combined = null;
+    if (model) {
+      this.history.attach(model);
+      this.unsubscribeLocked = model.subscribe(() => this.onModelChange());
+    }
+    this.onModelChange();
+    this.updateSnapshot();
+    this.requestRender();
   }
 
   /** Whether this person may edit. The schema check can still block it. */
@@ -398,19 +432,17 @@ export class BoardEngine implements ToolHost {
   }
 
   undo(): void {
-    const model = this.getEditableModel();
-    if (!model) return;
+    if (!this.getEditableModel()) return;
     this.textEditor.end();
     this.endGesture(true);
-    model.undo();
+    this.history.undo();
   }
 
   redo(): void {
-    const model = this.getEditableModel();
-    if (!model) return;
+    if (!this.getEditableModel()) return;
     this.textEditor.end();
     this.endGesture(true);
-    model.redo();
+    this.history.redo();
   }
 
   deleteSelection(): void {
@@ -418,20 +450,86 @@ export class BoardEngine implements ToolHost {
     if (!model || this.selection.size === 0) return;
     this.endGesture(true);
     const ids = [...this.selection].filter((id) => {
-      const item = model.getItem(id);
+      const item = this.getItem(id);
       return item !== undefined && this.canDelete(item);
     });
-    model.endStep();
-    model.deleteItems(ids);
-    model.endStep();
+    this.deleteFromLayers(ids);
     this.setSelection([]);
+  }
+
+  /** Deletes items from whichever layer holds them, as one undo step. */
+  private deleteFromLayers(ids: string[]): void {
+    const main = this.getEditableModel();
+    const locked = this.getWritableLockedModel();
+    const mainIds = ids.filter((id) => this.layerOf(id) === "main");
+    const lockedIds = ids.filter((id) => this.layerOf(id) === "locked");
+    this.history.group(() => {
+      if (main && mainIds.length > 0) main.deleteItems(mainIds);
+      if (locked && lockedIds.length > 0) locked.deleteItems(lockedIds);
+    });
+  }
+
+  /**
+   * Moves the selected items into the locked layer (tutors and admins).
+   * Nobody can then move, resize or erase them; students can't select them.
+   */
+  lockSelection(): void {
+    const main = this.getEditableModel();
+    const locked = this.getWritableLockedModel();
+    if (!main || !locked) return;
+    this.endGesture(true);
+    const ids = [...this.selection].filter((id) => this.layerOf(id) === "main");
+    this.history.group(() => {
+      for (const id of ids) {
+        const item = main.getItem(id);
+        if (!item) continue;
+        if (isPicture(item)) {
+          const asset = main.getAsset(item.assetId);
+          if (asset) locked.copyAsset(asset);
+        }
+        locked.importItem({ ...item, locked: false });
+      }
+      main.deleteItems(ids);
+    });
+    this.setSelection(ids);
+  }
+
+  /** Moves the selected items out of the locked layer, so they can be changed again. */
+  unlockSelection(): void {
+    const main = this.getEditableModel();
+    const locked = this.getWritableLockedModel();
+    if (!main || !this.host) return;
+    this.endGesture(true);
+    const ids = [...this.selection];
+    this.history.group(() => {
+      const moved: string[] = [];
+      const legacy = new Map<string, ItemPatch>();
+      for (const id of ids) {
+        if (this.layerOf(id) === "locked" && locked) {
+          const item = locked.getItem(id);
+          if (!item) continue;
+          if (isPicture(item)) {
+            const asset = locked.getAsset(item.assetId);
+            if (asset) main.copyAsset(asset);
+          }
+          main.importItem({ ...item, locked: false });
+          moved.push(id);
+        } else if (main.getItem(id)?.locked) {
+          // Locked before the locked layer existed (Phase 3): just clear the flag.
+          legacy.set(id, { locked: false });
+        }
+      }
+      if (locked && moved.length > 0) locked.deleteItems(moved);
+      if (legacy.size > 0) main.updateItems(legacy);
+    });
+    this.setSelection(ids);
   }
 
   /** Removes every page of the PDF the selected page came from (tutors and admins). */
   removeSelectedPdf(): void {
     const model = this.getEditableModel();
     if (!model || !this.host) return;
-    const page = [...this.selection].map((id) => model.getItem(id)).find((item) => item?.type === "pdfPage");
+    const page = [...this.selection].map((id) => this.getItem(id)).find((item) => item?.type === "pdfPage");
     if (page?.type !== "pdfPage" || !page.pdfId) return;
     const ids = this.getItems()
       .filter((item) => item.type === "pdfPage" && item.pdfId === page.pdfId)
@@ -441,9 +539,7 @@ export class BoardEngine implements ToolHost {
       return;
     }
     this.endGesture(true);
-    model.endStep();
-    model.deleteItems(ids);
-    model.endStep();
+    this.deleteFromLayers(ids);
     this.setSelection([]);
   }
 
@@ -502,7 +598,7 @@ export class BoardEngine implements ToolHost {
 
   /** True when this person may add PDFs: tutors and admins who can edit. */
   canAddPdf(): boolean {
-    return this.host && this.isEditable() && this.options.assets !== undefined;
+    return this.getWritableLockedModel() !== null && this.options.assets !== undefined;
   }
 
   /**
@@ -511,6 +607,7 @@ export class BoardEngine implements ToolHost {
    */
   beginPdfImport(placement: PdfPlacement): PdfPlacer {
     this.getEditableModel()?.endStep();
+    this.getWritableLockedModel()?.endStep();
     let x: number;
     let y: number;
     if (placement === "stack") {
@@ -557,7 +654,8 @@ export class BoardEngine implements ToolHost {
     area: { x: number; y: number; w: number; h: number },
     info: { pdfId: string; pdfName: string; pageNumber: number; locked: boolean },
   ): boolean {
-    const model = this.getEditableModel();
+    // Locked pages go into the locked layer, which only hosts can write.
+    const model = info.locked ? this.getWritableLockedModel() : this.getEditableModel();
     if (!model || !this.host) return false;
     model.addAsset({
       id: page.assetId,
@@ -579,7 +677,7 @@ export class BoardEngine implements ToolHost {
       fill: null,
       strokeWidth: 0,
       opacity: 1,
-      locked: info.locked,
+      locked: false,
       assetId: page.assetId,
       w: area.w,
       h: area.h,
@@ -593,6 +691,7 @@ export class BoardEngine implements ToolHost {
   /** Ends a PDF import, so the whole import is one undo step. */
   endPdfImport(): void {
     this.getEditableModel()?.endStep();
+    this.getWritableLockedModel()?.endStep();
   }
 
   zoomIn(): void {
@@ -695,16 +794,54 @@ export class BoardEngine implements ToolHost {
   }
 
   geometryOf(item: BoardItem): ItemGeometry {
-    const version = this.model?.getItemVersion(item.id) ?? null;
-    return this.cache.get(item, version);
+    return this.cache.get(item, this.versionOf(item.id));
   }
 
+  /** An item from either layer. Locked-layer items always read as locked. */
   getItem(id: string): BoardItem | undefined {
-    return this.model?.getItem(id);
+    return this.layers().byId.get(id)?.item;
   }
 
+  /** Both layers' items, locked layer first (underneath). */
   getItems(): readonly BoardItem[] {
-    return this.model?.getSortedItems() ?? [];
+    return this.layers().items;
+  }
+
+  private layers(): NonNullable<BoardEngine["combined"]> {
+    const main = this.model?.getSortedItems() ?? NO_ITEMS;
+    const locked = this.lockedModel?.getSortedItems() ?? NO_ITEMS;
+    const cached = this.combined;
+    if (cached && cached.main === main && cached.locked === locked) return cached;
+    const byId = new Map<string, { item: BoardItem; layer: "main" | "locked" }>();
+    const items: BoardItem[] = [];
+    for (const raw of locked) {
+      const item = raw.locked ? raw : { ...raw, locked: true };
+      items.push(item);
+      byId.set(item.id, { item, layer: "locked" });
+    }
+    for (const item of main) {
+      items.push(item);
+      byId.set(item.id, { item, layer: "main" });
+    }
+    this.combined = { main, locked, items, byId };
+    return this.combined;
+  }
+
+  private layerOf(id: string): "main" | "locked" | null {
+    return this.layers().byId.get(id)?.layer ?? null;
+  }
+
+  private versionOf(id: string): number {
+    return this.layerOf(id) === "locked"
+      ? (this.lockedModel?.getItemVersion(id) ?? 0)
+      : (this.model?.getItemVersion(id) ?? 0);
+  }
+
+  /** The locked layer, when this person may write it: hosts who can edit. */
+  private getWritableLockedModel(): BoardModel | null {
+    return this.host && this.isEditable() && this.lockedModel?.getSchemaStatus() === "ok"
+      ? this.lockedModel
+      : null;
   }
 
   publishLaser(points: Point[] | null): void {
@@ -745,14 +882,14 @@ export class BoardEngine implements ToolHost {
     if (this.isEditable() !== this.snapshot.editable) this.applyEditability();
     let pruned = false;
     for (const id of this.selection) {
-      if (!model.getItem(id)) {
+      if (!this.getItem(id)) {
         this.selection.delete(id);
         pruned = true;
       }
     }
     if (pruned) this.selection = new Set(this.selection);
     this.updateSnapshot();
-    this.cache.prune((id) => model.getItem(id) !== undefined);
+    this.cache.prune((id) => this.getItem(id) !== undefined);
     this.requestRender();
   }
 
@@ -823,7 +960,7 @@ export class BoardEngine implements ToolHost {
       dpr: this.dpr,
       items: this.getItems(),
       geometryOf: (item, preview) =>
-        preview ? this.cache.get(item, null) : this.cache.get(item, model?.getItemVersion(item.id) ?? 0),
+        preview ? this.cache.get(item, null) : this.cache.get(item, this.versionOf(item.id)),
       override: (id) => tool.overrideItem?.(id) ?? null,
       hidden,
       faded: tool.fadedIds?.() ?? EMPTY,
@@ -833,7 +970,7 @@ export class BoardEngine implements ToolHost {
       cursors: this.cursors,
       lasers,
       image: (assetId) => {
-        const asset = model?.getAsset(assetId);
+        const asset = model?.getAsset(assetId) ?? this.lockedModel?.getAsset(assetId);
         if (!asset) return null;
         // Stored files need a signed link; Phase 2 images are inline.
         const src = asset.key ? (this.options.assets?.viewUrl(asset.key) ?? null) : asset.dataURL;
@@ -856,7 +993,7 @@ export class BoardEngine implements ToolHost {
       this.gesture === null &&
       this.textEditor.editingId === null;
     if (!visible) {
-      this.selectionBar.update({ area: null, showRemovePdf: false, containerWidth: this.width });
+      this.selectionBar.update({ area: null, showRemovePdf: false, showLock: false, showUnlock: false, containerWidth: this.width });
       return;
     }
     let minX = Infinity;
@@ -865,11 +1002,15 @@ export class BoardEngine implements ToolHost {
     let maxY = -Infinity;
     let deletable = false;
     let pdf = false;
+    let lockable = false;
+    let unlockable = false;
     for (const id of this.selection) {
-      const item = model.getItem(id);
+      const item = this.getItem(id);
       if (!item) continue;
       if (this.canDelete(item)) deletable = true;
       if (item.type === "pdfPage" && item.pdfId) pdf = true;
+      if (item.locked) unlockable = true;
+      else lockable = true;
       const b = this.geometryOf(item).bounds;
       minX = Math.min(minX, b.minX);
       minY = Math.min(minY, b.minY);
@@ -877,7 +1018,7 @@ export class BoardEngine implements ToolHost {
       maxY = Math.max(maxY, b.maxY);
     }
     if (!deletable || minX === Infinity) {
-      this.selectionBar.update({ area: null, showRemovePdf: false, containerWidth: this.width });
+      this.selectionBar.update({ area: null, showRemovePdf: false, showLock: false, showUnlock: false, containerWidth: this.width });
       return;
     }
     const z = this.camera.zoom;
@@ -889,6 +1030,8 @@ export class BoardEngine implements ToolHost {
         h: (maxY - minY) * z,
       },
       showRemovePdf: pdf && this.host,
+      showLock: lockable && this.getWritableLockedModel() !== null,
+      showUnlock: unlockable && this.host,
       containerWidth: this.width,
     });
   }
@@ -902,7 +1045,7 @@ export class BoardEngine implements ToolHost {
     let fontSize = this.style.fontSize;
     const [firstSelected] = this.selection;
     const firstId = this.textEditor.editingId ?? firstSelected;
-    const first = firstId ? this.model?.getItem(firstId) : undefined;
+    const first = firstId ? this.getItem(firstId) : undefined;
     if (first) {
       if (!isPicture(first)) strokeColor = first.stroke;
       if (first.type === "rect" || first.type === "ellipse") fillColor = first.fill;
@@ -914,8 +1057,8 @@ export class BoardEngine implements ToolHost {
       editable,
       canUpload: editable && this.allowedToUpload && this.options.assets !== undefined,
       canAddPdf: this.canAddPdf(),
-      canUndo: editable && (this.model?.canUndo() ?? false),
-      canRedo: editable && (this.model?.canRedo() ?? false),
+      canUndo: editable && this.history.canUndo(),
+      canRedo: editable && this.history.canRedo(),
       zoom: this.camera.zoom,
       selectionCount: this.selection.size,
       schema: this.model?.getSchemaStatus() ?? null,

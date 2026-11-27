@@ -128,7 +128,7 @@ export function createSpaceLink(
 
 export function getBoardToken(
   sessionId: string,
-  options: { roomId?: string; spy?: boolean } = {},
+  options: { roomId?: string; spy?: boolean; layer?: "main" | "locked" } = {},
 ): Promise<{
   token: string;
   documentName: string;

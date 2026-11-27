@@ -3,11 +3,14 @@ import { z } from "zod";
 import { prisma } from "../../db.js";
 import { getOptionalUser, getParticipantCookieId } from "../join/service.js";
 import { readPermissions } from "../sessions/permissions.js";
+import { LOCKED_LAYER_SUFFIX } from "./service.js";
 
 const paramsSchema = z.object({ sessionId: z.string().uuid() });
 const bodySchema = z.object({
   roomId: z.string().uuid().optional(),
   spy: z.boolean().optional(),
+  /** "locked": the board's locked layer, writable only by hosts. */
+  layer: z.enum(["main", "locked"]).optional(),
 }).optional();
 
 const errorResponse = {
@@ -73,6 +76,7 @@ export const boardRoutes: FastifyPluginAsync = async (app) => {
           properties: {
             roomId: { type: "string", format: "uuid" },
             spy: { type: "boolean" },
+            layer: { type: "string", enum: ["main", "locked"] },
           },
         },
         response: {
@@ -142,21 +146,22 @@ export const boardRoutes: FastifyPluginAsync = async (app) => {
         });
         if (!room) return reply.code(404).send({ message: "Breakout room not found" });
       }
-      const documentName = roomId
+      const boardName = roomId
         ? `${parsedParams.data.sessionId}:${roomId}`
         : `space:${participant.session.spaceId}:main`;
+      const lockedLayer = parsedBody.data?.layer === "locked";
+      const documentName = lockedLayer ? `${boardName}${LOCKED_LAYER_SUFFIX}` : boardName;
+      const host = participant.classRole === "admin" || participant.classRole === "tutor";
       const token = await reply.jwtSign(
         {
           sub: participant.id,
           classRole: participant.classRole,
-          // Hosts can always draw on their own board. Spy views and observers
-          // are always read-only.
+          // Hosts can always draw on their own board; only hosts can write
+          // the locked layer. Spy views and observers are always read-only.
           editing:
             !spy &&
             participant.classRole !== "observer" &&
-            (participant.classRole === "admin" ||
-              participant.classRole === "tutor" ||
-              readPermissions(participant.permissions).editing),
+            (host || (!lockedLayer && readPermissions(participant.permissions).editing)),
           spy,
           documentName,
         },

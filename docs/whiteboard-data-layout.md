@@ -1,7 +1,8 @@
 # Whiteboard data layout (version 2)
 
-Status: Phase 3 implements every item type including `pdfPage`, `assets` stored in Cloudflare R2,
-and awareness `user`, `color`, `cursor` and `laser`, behind `VITE_BOARD_ENGINE=tuteria`. Code:
+Status: Phase 4 adds the server-enforced locked layer (`{name}:locked`) and one undo history across
+both documents. Phase 3 added every item type including `pdfPage`, `assets` stored in Cloudflare
+R2, and awareness `user`, `color`, `cursor` and `laser`. All behind `VITE_BOARD_ENGINE=tuteria`. Code:
 `frontend/src/board/model/`, per item type `frontend/src/board/engine/items.ts`, storage
 `backend/src/services/storage.ts` and `backend/src/modules/boards/uploads.ts`. The Excalidraw board
 (version 1) stays the default until switch-over.
@@ -29,10 +30,12 @@ Hocuspocus document names don't change:
 |---|---|
 | Main board of a space (kept across sessions) | `space:{spaceId}:main` |
 | Breakout room board (one session) | `{sessionId}:{roomId}` |
-| Locked layer of either board (Phase 4) | `{name}:locked` |
+| Locked layer of either board | `{name}:locked`, e.g. `space:{spaceId}:main:locked` |
 
-The server stores each document as opaque bytes in `boards.data`. The backend needs no change
-for version 2.
+The server stores each document as opaque bytes in `boards.data`. Both documents of a board use the
+same layout below. The browser asks for each with its own token: `POST /boards/{sessionId}/token`
+with `layer: "locked"` returns a token for the locked layer. It opens two connections per board, one
+for each document.
 
 ## Root types in each document
 
@@ -82,7 +85,7 @@ item (one moves it, one changes its colour) then merge instead of one overwritin
 | `fill` | string \| null | Hex colour, or none |
 | `strokeWidth` | number | World units |
 | `opacity` | number | 0 to 1 |
-| `locked` | boolean | Eraser, select and delete skip locked items. Phase 4 enforces this on the server with the locked layer. |
+| `locked` | boolean | Only from Phase 3, when PDF pages were locked inside the main document (checked in the browser only). New items always write `false`: an item is locked by being in the locked layer. |
 
 ### Item types
 
@@ -95,7 +98,7 @@ item (one moves it, one changes its colour) then merge instead of one overwritin
 | `image` | `assetId`, `w`, `h` |
 | `pdfPage` | `assetId`, `w`, `h`, `pdfId` (shared by every page of one import), `pdfName`, `pageNumber` |
 
-From Phase 4, `pdfPage` items are written to the locked-layer document.
+PDF pages placed as "locked" are written to the locked-layer document.
 
 A client skips item types it doesn't know, so an older client ignores newer types rather than
 breaking.
@@ -193,6 +196,10 @@ to do.
 - An abandoned gesture (a second finger turns a stroke into a pinch) is reverted and removed from
   history with `discardStep()`.
 - Moves are written every 50 ms while dragging, so others see them live.
+- **One history for both documents** (`model/history.ts`). Each document keeps its own
+  `Y.UndoManager`; the shared history records which document(s) each step touched. Undo always
+  reverts this person's latest step. A step that changes both documents at once (locking,
+  unlocking, deleting a selection that spans both) is one step and is undone in one go.
 
 ## Awareness (live presence, never saved)
 
@@ -206,15 +213,38 @@ to do.
 
 ## Permissions
 
-- **Now and Phases 1 to 3:** the server's per-connection `readOnly` check (`boards/service.ts`)
-  decides who may write a document. The client hides editing tools when `canEdit` is false.
+- The server's per-connection `readOnly` check (`boards/service.ts`) decides who may write a
+  document. The client hides editing tools when `canEdit` is false.
 - **Uploads (server-checked):** observers never. Tutors and admins always. Students and guests need
   editing; for images also File uploads. Only tutors and admins can add PDF pages.
-- **Locked items:** nobody can move, resize or erase them. Tutors and admins can select them to
-  delete them (trash button or Delete key). Students can't select them at all. In Phase 3 this is
-  checked in the browser only; Phase 4 moves locked items into the server-enforced locked layer.
-- **Phase 4:** `{name}:locked` uses this same layout. Only admins and tutors can write to it;
-  everyone else connects read-only. It is drawn underneath the main document.
+- **Locked layer (server-checked):** see the next section.
+
+## Locked layer
+
+Each board has a second document, `{name}:locked`, drawn **underneath** the main document.
+
+| Who | Main document | Locked layer |
+|---|---|---|
+| Tutor or admin | Writes | Writes |
+| Student or guest with editing | Writes | Read-only |
+| Student or guest without editing | Read-only | Read-only |
+| Observer, or anyone in spy mode | Read-only | Read-only |
+
+The server sets this when the connection opens (`onAuthenticate`) and keeps it when a tutor changes
+Editing (`updateBoardParticipantEditing`): the permission never makes a locked layer writable for
+anyone but a host. A locked layer passes the same board checks as its board (own main board, own
+breakout room, or spy mode), so it works in breakout rooms too.
+
+In the browser:
+
+- Items in the locked layer can't be moved, resized or erased by anyone, tutors included. Students
+  can draw on top of them, in the main document.
+- Tutors and admins can select locked items, to delete them or unlock them. Students can't select
+  them at all.
+- **Lock** (selection bar, tutors and admins) moves the selected items into the locked layer.
+  **Unlock** moves them back. The item keeps its id and author and goes on top of its new layer.
+  Images and PDF pages bring their asset entry with them. Both can be undone.
+- Live cursors and the laser travel only on the main document.
 
 ## PDFs
 
@@ -224,9 +254,9 @@ scrolls into view) to untick, then a placement:
 
 | Choice | What happens |
 |---|---|
-| Below the board, locked (default) | Pages stacked under everything already on the board, 800 wide with a 24 gap, `locked: true`. |
+| Below the board, locked (default) | Pages stacked under everything already on the board, 800 wide with a 24 gap, in the **locked layer**. |
 | Each page on its own tab | Shown but disabled until tabs exist (Phase 5). |
-| Where I'm looking, movable | Same stack, starting in the current view, `locked: false`. |
+| Where I'm looking, movable | Same stack, starting in the current view, in the main document. |
 
 Pages are drawn and uploaded one at a time, so there is no page limit and memory stays low. The
 whole import is one undo step. Cancel stops after the current page; pages already added stay.
